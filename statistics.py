@@ -1,1348 +1,2013 @@
-# =============================================================================
-# Dermatoloji Uzmanlık Tezi - Kapsamlı Veri Analizi
-# arcankc - 2025-09-23 12:27:58 UTC
-#
-# ÖZELLIKLER:
-# - Model vs Uzman vs Asistan karşılaştırması
-# - Deneyim süresi ile başarı oranı analizi
-# - Sınıf bazlı detaylı analizler
-# - Veri dengesizliği önlemleri
-# - Türkçe açıklamalar ve görselleştirmeler
-# - Kapsamlı istatistiksel testler
-# =============================================================================
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+=============================================================================
+DERMATOLOJI UZMANLIK TEZİ - KAPSAMLI VERİ ANALİZ SİSTEMİ
+=============================================================================
 
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
+Bu program dermatoloji uzmanlık tezi için yapay zeka modeli ile uzman/asistan
+performansının karşılaştırmalı analizini yapmaktadır.
+
+Özellikler:
+- Katılımcı veri temizleme ve filtreleme
+- 8 sınıf bazlı dermatolojik hastalık analizi
+- İstatistiksel testler (p < 0.05)
+- Kapsamlı görselleştirmeler (Türkçe)
+- Tez için hazır çıktılar
+
+Geliştirici: arcankc
+GitHub: https://github.com/arcankc
+Tarih: 24.09.2025
+"""
+
+import os
+import sys
 import warnings
+import logging
 from pathlib import Path
 from datetime import datetime
 import json
-import os
+import traceback
 
-# İstatistiksel testler için
+# Veri işleme ve analiz
+import pandas as pd
+import numpy as np
 from scipy import stats
-from scipy.stats import chi2_contingency, fisher_exact, mannwhitneyu, kruskal
+from scipy.stats import mannwhitneyu, kruskal, pearsonr, spearmanr, shapiro
+from scipy.stats import chi2_contingency, fisher_exact, ttest_ind, ttest_rel
+from sklearn.metrics import cohen_kappa_score, classification_report, confusion_matrix
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score, roc_curve
 from statsmodels.stats.contingency_tables import mcnemar
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, confusion_matrix, \
-    classification_report
-from sklearn.metrics import cohen_kappa_score, matthews_corrcoef
-from sklearn.utils.class_weight import compute_class_weight
+from statsmodels.stats.proportion import proportions_ztest
+import statsmodels.api as sm
 
-# Türkçe karakter desteği
-plt.rcParams['font.family'] = 'DejaVu Sans'
+# Görselleştirme
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+import seaborn as sns
+from matplotlib.gridspec import GridSpec
+import matplotlib.font_manager as fm
+
+# Uyarıları filtrele
 warnings.filterwarnings('ignore')
+
+# Türkçe karakter desteği için matplotlib ayarları
+plt.rcParams['font.family'] = ['DejaVu Sans', 'Arial', 'sans-serif']
+plt.rcParams['axes.unicode_minus'] = False
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
+
 CONFIG = {
     'paths': {
-        'base_dir': r'C:\Users\kivan\Desktop\TEZ ANALİZ\Python ile Veri Analizi',
-        'model_results': r'C:\Users\kivan\Desktop\TEZ ANALİZ\Python ile Veri Analizi\detailed_results.csv',
-        'participant_results': r'C:\Users\kivan\Desktop\TEZ ANALİZ\Python ile Veri Analizi\Quiz Sonuçları v2.xlsx',
-        'output_dir': r'C:\Users\kivan\Desktop\TEZ ANALİZ\Python ile Veri Analizi\Analiz_Sonuclari'
+        'base_dir': r'C:\Users\kivan\Desktop\tez_analiz\Deit Quiz ve Test',
+        'participant_results': r'C:\Users\kivan\Desktop\tez_analiz\Deit Quiz ve Test\quiz_sonuclari322.csv',
+        'model_quiz_results': r'C:\Users\kivan\Desktop\tez_analiz\Deit Quiz ve Test\Deit Quiz Output\quiz_detailed_results.csv',
+        'model_test_results': r'C:\Users\kivan\Desktop\tez_analiz\Deit Quiz ve Test\DeiT_Test_Output\test_detailed_results.csv',
+        'output_dir': r'C:\Users\kivan\Desktop\tez_analiz\Deit Quiz ve Test\Veri_analizi_python'
+    },
+
+    'data_cleaning': {
+        'skip_first_n_rows': 14,
+        'duplicate_strategy': 'keep_highest_score',
+        'exclude_conditions': {
+            'position': 'resident',
+            'experience': '<1'
+        }
     },
 
     'classes': {
-        'ak': 'Aktinik Keratoz',
+        'nv': 'Nevüs (Benign)',
+        'mel': 'Melanom (Malign)',
         'bcc': 'Bazal Hücreli Karsinom',
+        'ak': 'Aktinik Keratoz',
         'bkl': 'Benign Keratoz',
         'df': 'Dermatofibrom',
-        'mel': 'Melanom',
-        'nv': 'Nevüs',
         'vasc': 'Vasküler Lezyon',
         'scc': 'Skuamöz Hücreli Karsinom'
     },
 
     'colors': {
-        'uzman': '#2E86AB',  # Mavi
-        'asistan': '#A23B72',  # Mor
-        'model': '#F18F01',  # Turuncu
-        'success': '#2ECC71',  # Yeşil
-        'error': '#E74C3C',  # Kırmızı
-        'neutral': '#95A5A6'  # Gri
+        'model': '#3498DB',  # Mavi - AI Model
+        'uzman': '#2ECC71',  # Yeşil - Uzman
+        'asistan': '#E74C3C',  # Kırmızı - Asistan
+        'resident': '#F39C12',  # Turuncu - Resident
+        'success': '#27AE60',  # Koyu yeşil
+        'error': '#E67E22',  # Turuncu
+        'neutral': '#95A5A6',  # Gri
+        'background': '#ECF0F1'  # Açık gri
     },
 
-    'participant_mapping': {
-        'experience_groups': {
-            'Uzman': ['Prof. Dr.', 'Doç. Dr.', 'Dr. Öğr. Üyesi', 'Uzman Dr.'],
-            'Asistan': ['Asistan Dr.', 'Araştırma Görevlisi']
-        }
+    'analysis': {
+        'significance_level': 0.05,
+        'confidence_interval': 0.95,
+        'bootstrap_samples': 1000,
+        'random_state': 42
     }
 }
 
 
 # =============================================================================
-# DATA LOADING AND PREPROCESSING
+# LOGGING SETUP
 # =============================================================================
-class DataProcessor:
-    """Veri yükleme ve ön işleme sınıfı"""
+
+def setup_logging():
+    """Logging sistemini kur"""
+    output_dir = Path(CONFIG['paths']['output_dir'])
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    log_file = output_dir / f"analiz_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_file, encoding='utf-8'),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+
+    return logging.getLogger(__name__)
+
+
+# =============================================================================
+# DATA PROCESSOR CLASS
+# =============================================================================
+
+class DermatologyDataProcessor:
+    """Dermatoloji verilerini işleme sınıfı"""
 
     def __init__(self):
-        self.model_data = None
+        self.logger = logging.getLogger(__name__)
         self.participant_data = None
+        self.model_quiz_data = None
+        self.model_test_data = None
+        self.cleaned_data = None
         self.merged_data = None
 
     def load_data(self):
         """Veri dosyalarını yükle"""
-        print("📁 Veri dosyaları yükleniyor...")
+        self.logger.info("📁 Veri dosyaları yükleniyor...")
 
         try:
-            # Model sonuçlarını yükle
-            self.model_data = pd.read_csv(CONFIG['paths']['model_results'])
-            print(f"✅ Model verileri yüklendi: {len(self.model_data)} kayıt")
+            # Katılımcı sonuçları
+            self.participant_data = pd.read_csv(CONFIG['paths']['participant_results'])
+            self.logger.info(f"✅ Katılımcı verileri yüklendi: {len(self.participant_data)} kayıt")
 
-            # Katılımcı sonuçlarını yükle
-            self.participant_data = pd.read_excel(CONFIG['paths']['participant_results'])
-            print(f"✅ Katılımcı verileri yüklendi: {len(self.participant_data)} kayıt")
+            # Model quiz sonuçları
+            self.model_quiz_data = pd.read_csv(CONFIG['paths']['model_quiz_results'])
+            self.logger.info(f"✅ Model quiz verileri yüklendi: {len(self.model_quiz_data)} kayıt")
+
+            # Model test sonuçları
+            self.model_test_data = pd.read_csv(CONFIG['paths']['model_test_results'])
+            self.logger.info(f"✅ Model test verileri yüklendi: {len(self.model_test_data)} kayıt")
 
             return True
 
         except Exception as e:
-            print(f"❌ Veri yükleme hatası: {e}")
+            self.logger.error(f"❌ Veri yükleme hatası: {e}")
             return False
 
-    def preprocess_model_data(self):
-        """Model verilerini ön işle"""
-        print("🔧 Model verileri işleniyor...")
+    def clean_participant_data(self):
+        """Katılımcı verilerini temizle"""
+        self.logger.info("🧹 Katılımcı verileri temizleniyor...")
 
-        # Model başarı durumunu hesapla
-        if 'CNN + TTA_correct' in self.model_data.columns:
-            self.model_data['model_correct'] = self.model_data['CNN + TTA_correct']
-        elif 'LightGBM_correct' in self.model_data.columns:
-            self.model_data['model_correct'] = self.model_data['LightGBM_correct']
-        else:
-            # İlk mevcut model sonucunu kullan
-            correct_cols = [col for col in self.model_data.columns if col.endswith('_correct')]
-            if correct_cols:
-                self.model_data['model_correct'] = self.model_data[correct_cols[0]]
+        if self.participant_data is None:
+            self.logger.error("❌ Katılımcı verileri yüklenmemiş!")
+            return False
 
-        # Sınıf bilgilerini düzenle
-        if 'correct_diagnosis_mapped' in self.model_data.columns:
-            self.model_data['true_class'] = self.model_data['correct_diagnosis_mapped']
-        elif 'dx' in self.model_data.columns:
-            self.model_data['true_class'] = self.model_data['dx']
+        original_count = len(self.participant_data)
 
-        print(f"✅ Model verileri işlendi. Model başarı oranı: {self.model_data['model_correct'].mean():.3f}")
+        # 1. İlk 14 satırı atla
+        skip_rows = CONFIG['data_cleaning']['skip_first_n_rows']
+        if skip_rows > 0:
+            self.participant_data = self.participant_data.iloc[skip_rows:].reset_index(drop=True)
+            self.logger.info(f"📝 İlk {skip_rows} satır atlandı")
 
-    def preprocess_participant_data(self):
-        """Katılımcı verilerini ön işle"""
-        print("🔧 Katılımcı verileri işleniyor...")
+        # 2. Duplike participant_id'leri temizle (en yüksek skoru tut)
+        if 'participant_id' in self.participant_data.columns and 'success_rate' in self.participant_data.columns:
+            # Success rate string ise float'a çevir
+            if self.participant_data['success_rate'].dtype == 'object':
+                self.participant_data['success_rate'] = self.participant_data['success_rate'].str.rstrip('%').astype(
+                    float) / 100
 
-        # Gerekli sütunları kontrol et ve oluştur
-        required_columns = ['participant_id', 'question_id', 'participant_answer', 'correct_answer',
-                            'is_correct', 'experience_level', 'experience_years']
+            # En yüksek skorlu kayıtları tut
+            self.participant_data = self.participant_data.loc[
+                self.participant_data.groupby('participant_id')['success_rate'].idxmax()
+            ].reset_index(drop=True)
+            self.logger.info(f"🔄 Duplike participant_id'ler temizlendi (en yüksek skor tutuldu)")
 
-        missing_columns = [col for col in required_columns if col not in self.participant_data.columns]
-        if missing_columns:
-            print(f"⚠️ Eksik sütunlar: {missing_columns}")
-            # Alternatif sütun isimlerini dene
-            self._map_alternative_columns()
+        # 3. Deneyim filtreleme: position=resident ve experience=<1 olanları çıkar
+        exclude_condition = (
+                (self.participant_data['position'] == 'resident') &
+                (self.participant_data['experience'] == '<1')
+        )
+        excluded_count = exclude_condition.sum()
+        self.participant_data = self.participant_data[~exclude_condition].reset_index(drop=True)
 
-        # Deneyim gruplarını oluştur
-        self._create_experience_groups()
+        if excluded_count > 0:
+            self.logger.info(f"🚫 {excluded_count} katılımcı deneyim kriteri nedeniyle çıkarıldı")
 
-        # Başarı oranlarını hesapla
-        self._calculate_success_rates()
+        # 4. Grup tanımlamaları oluştur
+        self.participant_data['group'] = 'Diğer'
 
-        print(f"✅ Katılımcı verileri işlendi. Toplam katılımcı: {self.participant_data['participant_id'].nunique()}")
+        # Position bazlı gruplandırma
+        uzman_positions = ['specialist', 'attending', 'consultant', 'expert']
+        resident_positions = ['resident', 'trainee']
 
-    def _map_alternative_columns(self):
-        """Alternatif sütun isimlerini eşleştir"""
-        column_mappings = {
-            'participant_id': ['id', 'user_id', 'katilimci_id'],
-            'question_id': ['soru_id', 'question', 'q_id'],
-            'participant_answer': ['answer', 'cevap', 'secim'],
-            'correct_answer': ['dogru_cevap', 'correct', 'true_answer'],
-            'is_correct': ['dogru_mu', 'correct', 'basarili'],
-            'experience_level': ['unvan', 'level', 'seviye'],
-            'experience_years': ['yil', 'years', 'deneyim']
-        }
+        for pos in uzman_positions:
+            mask = self.participant_data['position'].str.lower().str.contains(pos, na=False)
+            self.participant_data.loc[mask, 'group'] = 'Uzman'
 
-        for target_col, alternatives in column_mappings.items():
-            if target_col not in self.participant_data.columns:
-                for alt in alternatives:
-                    if alt in self.participant_data.columns:
-                        self.participant_data[target_col] = self.participant_data[alt]
-                        print(f"📝 {alt} -> {target_col} eşleştirildi")
-                        break
+        for pos in resident_positions:
+            mask = self.participant_data['position'].str.lower().str.contains(pos, na=False)
+            self.participant_data.loc[mask, 'group'] = 'Resident'
 
-    def _create_experience_groups(self):
-        """Deneyim gruplarını oluştur"""
-        if 'experience_level' in self.participant_data.columns:
-            # Unvan bazlı gruplandırma
-            self.participant_data['group'] = 'Diğer'
+        # Veri türlerini düzenle
+        self._process_participant_columns()
 
-            for group, titles in CONFIG['participant_mapping']['experience_groups'].items():
-                mask = self.participant_data['experience_level'].isin(titles)
-                self.participant_data.loc[mask, 'group'] = group
+        final_count = len(self.participant_data)
+        self.logger.info(f"✅ Veri temizleme tamamlandı: {original_count} → {final_count} kayıt")
 
-        elif 'experience_years' in self.participant_data.columns:
-            # Yıl bazlı gruplandırma
-            self.participant_data['group'] = pd.cut(
-                self.participant_data['experience_years'],
-                bins=[0, 2, 5, 10, 100],
-                labels=['0-2 Yıl', '3-5 Yıl', '6-10 Yıl', '10+ Yıl']
-            )
+        # Grup dağılımını göster
+        group_counts = self.participant_data['group'].value_counts()
+        self.logger.info("👥 Grup dağılımı:")
+        for group, count in group_counts.items():
+            self.logger.info(f"   {group}: {count} katılımcı")
 
-    def _calculate_success_rates(self):
-        """Başarı oranlarını hesapla"""
-        if 'is_correct' not in self.participant_data.columns:
-            if 'participant_answer' in self.participant_data.columns and 'correct_answer' in self.participant_data.columns:
-                self.participant_data['is_correct'] = (
-                        self.participant_data['participant_answer'] == self.participant_data['correct_answer']
-                )
+        return True
+
+    def _process_participant_columns(self):
+        """Katılımcı sütunlarını işle"""
+        # Soru bazlı doğru cevap verilerini çıkar
+        question_columns = []
+        for i in range(1, 81):  # 80 soruya kadar
+            q_correct_col = f'q{i}_is_correct'
+            if q_correct_col in self.participant_data.columns:
+                question_columns.append(q_correct_col)
+
+        # Her soru için ayrı satır oluştur (long format)
+        participant_long = []
+
+        for idx, row in self.participant_data.iterrows():
+            participant_id = row['participant_id']
+            group = row['group']
+            position = row['position']
+            experience = row['experience']
+
+            for i in range(1, 81):
+                q_id_col = f'q{i}_id'
+                q_isic_col = f'q{i}_isic_id'
+                q_correct_col = f'q{i}_is_correct'
+                q_selected_col = f'q{i}_selected_code'
+                q_answer_col = f'q{i}_correct_code'
+
+                if all(col in self.participant_data.columns for col in [q_id_col, q_correct_col]):
+                    participant_long.append({
+                        'participant_id': participant_id,
+                        'group': group,
+                        'position': position,
+                        'experience': experience,
+                        'question_id': row[q_id_col],
+                        'isic_id': row.get(q_isic_col, ''),
+                        'is_correct': row[q_correct_col] == 'TRUE' if pd.notna(row[q_correct_col]) else False,
+                        'selected_answer': row.get(q_selected_col, ''),
+                        'correct_answer': row.get(q_answer_col, '')
+                    })
+
+        self.cleaned_data = pd.DataFrame(participant_long)
+        self.logger.info(f"📊 Long format veri oluşturuldu: {len(self.cleaned_data)} kayıt")
+
+    def prepare_model_data(self):
+        """Model verilerini hazırla"""
+        self.logger.info("🤖 Model verileri hazırlanıyor...")
+
+        if self.model_quiz_data is None:
+            self.logger.error("❌ Model quiz verileri yüklenmemiş!")
+            return False
+
+        # Model performans sütunlarını belirle
+        model_columns = [col for col in self.model_quiz_data.columns if col.endswith('_correct')]
+
+        if not model_columns:
+            self.logger.error("❌ Model performans sütunları bulunamadı!")
+            return False
+
+        # En iyi performanslı modeli seç (Simple Ensemble tercih edilir)
+        preferred_models = ['Simple Ensemble_correct', 'CNN + TTA_correct', 'CNN Standard_correct']
+
+        selected_model = None
+        for model in preferred_models:
+            if model in model_columns:
+                selected_model = model
+                break
+
+        if selected_model is None:
+            selected_model = model_columns[0]
+
+        self.model_quiz_data['model_correct'] = self.model_quiz_data[selected_model]
+        self.logger.info(f"🎯 Seçilen model: {selected_model}")
+
+        # Sınıf etiketlerini düzenle
+        if 'correct_diagnosis_mapped' in self.model_quiz_data.columns:
+            self.model_quiz_data['true_class'] = self.model_quiz_data['correct_diagnosis_mapped']
+        elif 'correct_diagnosis_code' in self.model_quiz_data.columns:
+            self.model_quiz_data['true_class'] = self.model_quiz_data['correct_diagnosis_code']
+
+        model_accuracy = self.model_quiz_data['model_correct'].mean()
+        self.logger.info(f"📈 Model başarı oranı: {model_accuracy:.3f} ({model_accuracy * 100:.1f}%)")
+
+        return True
 
     def merge_data(self):
-        """Model ve katılımcı verilerini birleştir"""
-        print("🔗 Veriler birleştiriliyor...")
+        """Katılımcı ve model verilerini birleştir"""
+        self.logger.info("🔗 Veriler birleştiriliyor...")
 
-        try:
-            # Question ID'ye göre birleştir
-            if 'question_id' in self.model_data.columns and 'question_id' in self.participant_data.columns:
-                self.merged_data = pd.merge(
-                    self.participant_data,
-                    self.model_data[['question_id', 'model_correct', 'true_class']],
-                    on='question_id',
-                    how='left'
-                )
-            else:
-                print("⚠️ Question ID eşleştirmesi yapılamadı, ayrı analizler yapılacak")
+        if self.cleaned_data is None or self.model_quiz_data is None:
+            self.logger.error("❌ Temizlenmiş veri bulunamadı!")
+            return False
 
-            print(f"✅ Veriler birleştirildi: {len(self.merged_data) if self.merged_data is not None else 0} kayıt")
+        # Question ID üzerinden birleştir
+        merge_keys = ['question_id']
+        if 'isic_id' in self.cleaned_data.columns and 'isic_id' in self.model_quiz_data.columns:
+            merge_keys.append('isic_id')
 
-        except Exception as e:
-            print(f"❌ Veri birleştirme hatası: {e}")
+        self.merged_data = pd.merge(
+            self.cleaned_data,
+            self.model_quiz_data[['question_id', 'isic_id', 'model_correct', 'true_class']],
+            on='question_id',
+            how='left'
+        )
+
+        merge_success = self.merged_data['model_correct'].notna().sum()
+        total_records = len(self.merged_data)
+
+        self.logger.info(f"✅ Veri birleştirme tamamlandı: {merge_success}/{total_records} kayıt eşleşti")
+
+        return merge_success > 0
 
 
 # =============================================================================
-# STATISTICAL ANALYSIS CLASS
+# STATISTICAL ANALYZER CLASS
 # =============================================================================
-class StatisticalAnalyzer:
+
+class DermatologyStatAnalyzer:
     """İstatistiksel analiz sınıfı"""
 
     def __init__(self, data_processor):
         self.dp = data_processor
+        self.logger = logging.getLogger(__name__)
         self.results = {}
 
-    def analyze_overall_performance(self):
-        """Genel performans analizi"""
-        print("\n📊 Genel performans analizi yapılıyor...")
+    def descriptive_statistics(self):
+        """Tanımlayıcı istatistikler"""
+        self.logger.info("📊 Tanımlayıcı istatistikler hesaplanıyor...")
 
         results = {}
 
-        # Model performansı
-        if self.dp.model_data is not None:
-            model_accuracy = self.dp.model_data['model_correct'].mean()
-            results['model'] = {
-                'accuracy': model_accuracy,
-                'total_questions': len(self.dp.model_data),
-                'correct_answers': self.dp.model_data['model_correct'].sum()
-            }
-
-        # Katılımcı performansı
+        # Katılımcı istatistikleri
         if self.dp.participant_data is not None:
-            participant_stats = self.dp.participant_data.groupby('participant_id')['is_correct'].agg(
-                ['mean', 'count', 'sum'])
-
-            results['participants'] = {
-                'average_accuracy': participant_stats['mean'].mean(),
-                'std_accuracy': participant_stats['mean'].std(),
-                'min_accuracy': participant_stats['mean'].min(),
-                'max_accuracy': participant_stats['mean'].max(),
-                'total_participants': len(participant_stats)
-            }
-
-        # Grup karşılaştırması
-        if 'group' in self.dp.participant_data.columns:
-            group_stats = self.dp.participant_data.groupby('group')['is_correct'].agg(['mean', 'count', 'std'])
-            results['groups'] = group_stats.to_dict()
-
-        self.results['overall'] = results
-        return results
-
-    def analyze_class_wise_performance(self):
-        """Sınıf bazlı performans analizi"""
-        print("\n📊 Sınıf bazlı performans analizi yapılıyor...")
-
-        results = {}
-
-        # Model sınıf performansı
-        if self.dp.model_data is not None and 'true_class' in self.dp.model_data.columns:
-            model_class_stats = self.dp.model_data.groupby('true_class')['model_correct'].agg(['mean', 'count', 'sum'])
-            results['model'] = model_class_stats.to_dict()
-
-        # Katılımcı sınıf performansı
-        if self.dp.merged_data is not None:
-            participant_class_stats = self.dp.merged_data.groupby(['true_class', 'group'])['is_correct'].agg(
-                ['mean', 'count'])
-            results['participants'] = participant_class_stats.to_dict()
-
-        self.results['class_wise'] = results
-        return results
-
-    def statistical_tests(self):
-        """İstatistiksel testler"""
-        print("\n📊 İstatistiksel testler yapılıyor...")
-
-        results = {}
-
-        if self.dp.merged_data is not None:
-            # Uzman vs Asistan karşılaştırması
-            uzman_data = self.dp.merged_data[self.dp.merged_data['group'] == 'Uzman']['is_correct']
-            asistan_data = self.dp.merged_data[self.dp.merged_data['group'] == 'Asistan']['is_correct']
-
-            if len(uzman_data) > 0 and len(asistan_data) > 0:
-                # Mann-Whitney U testi
-                u_stat, u_p = mannwhitneyu(uzman_data, asistan_data, alternative='two-sided')
-                results['uzman_vs_asistan'] = {
-                    'test': 'Mann-Whitney U',
-                    'u_statistic': u_stat,
-                    'p_value': u_p,
-                    'significant': u_p < 0.05,
-                    'uzman_mean': uzman_data.mean(),
-                    'asistan_mean': asistan_data.mean()
-                }
-
-            # Model vs İnsan karşılaştırması
-            human_accuracy = self.dp.merged_data.groupby('question_id')['is_correct'].mean()
-            model_accuracy = self.dp.merged_data.groupby('question_id')['model_correct'].first()
-
-            # Soru bazlı karşılaştırma
-            if len(human_accuracy) > 0 and len(model_accuracy) > 0:
-                common_questions = human_accuracy.index.intersection(model_accuracy.index)
-                if len(common_questions) > 0:
-                    human_acc_common = human_accuracy.loc[common_questions]
-                    model_acc_common = model_accuracy.loc[common_questions]
-
-                    # Paired t-test
-                    t_stat, t_p = stats.ttest_rel(human_acc_common, model_acc_common)
-                    results['model_vs_human'] = {
-                        'test': 'Paired t-test',
-                        't_statistic': t_stat,
-                        'p_value': t_p,
-                        'significant': t_p < 0.05,
-                        'human_mean': human_acc_common.mean(),
-                        'model_mean': model_acc_common.mean()
-                    }
-
-        self.results['statistical_tests'] = results
-        return results
-
-    def experience_analysis(self):
-        """Deneyim analizi"""
-        print("\n📊 Deneyim analizi yapılıyor...")
-
-        results = {}
-
-        if 'experience_years' in self.dp.participant_data.columns:
-            # Deneyim yılı ile başarı oranı korelasyonu
-            participant_stats = self.dp.participant_data.groupby('participant_id').agg({
-                'is_correct': 'mean',
-                'experience_years': 'first'
+            participant_summary = self.dp.participant_data.groupby('group').agg({
+                'participant_id': 'count',
+                'success_rate': ['mean', 'std', 'min', 'max', 'median'],
+                'total_time_spent': ['mean',
+                                     'std'] if 'total_time_spent' in self.dp.participant_data.columns else 'count'
             })
 
-            correlation, cor_p = stats.pearsonr(participant_stats['experience_years'], participant_stats['is_correct'])
+            results['participant_summary'] = participant_summary
 
-            results['experience_correlation'] = {
-                'correlation': correlation,
-                'p_value': cor_p,
-                'significant': cor_p < 0.05
+            # Genel istatistikler
+            total_participants = len(self.dp.participant_data)
+            results['total_participants'] = total_participants
+
+            # Grup dağılımı
+            group_distribution = self.dp.participant_data['group'].value_counts()
+            results['group_distribution'] = group_distribution.to_dict()
+
+        # Model performansı
+        if self.dp.model_quiz_data is not None:
+            model_accuracy = self.dp.model_quiz_data['model_correct'].mean()
+            model_performance_by_class = self.dp.model_quiz_data.groupby('true_class')['model_correct'].agg(
+                ['mean', 'count'])
+
+            results['model_performance'] = {
+                'overall_accuracy': model_accuracy,
+                'class_performance': model_performance_by_class.to_dict()
             }
 
-            # Deneyim grupları arası karşılaştırma
-            if 'group' in self.dp.participant_data.columns:
-                groups = self.dp.participant_data['group'].unique()
-                group_accuracies = []
+        # Sınıf dağılımı
+        if self.dp.merged_data is not None:
+            class_distribution = self.dp.merged_data['true_class'].value_counts()
+            results['class_distribution'] = class_distribution.to_dict()
 
-                for group in groups:
-                    group_data = self.dp.participant_data[self.dp.participant_data['group'] == group]
-                    group_acc = group_data.groupby('participant_id')['is_correct'].mean()
-                    group_accuracies.append(group_acc.values)
+        self.results['descriptive'] = results
+        self.logger.info("✅ Tanımlayıcı istatistikler tamamlandı")
 
-                if len(group_accuracies) > 1:
-                    # Kruskal-Wallis testi
-                    h_stat, h_p = kruskal(*group_accuracies)
-                    results['group_comparison'] = {
-                        'test': 'Kruskal-Wallis',
-                        'h_statistic': h_stat,
-                        'p_value': h_p,
-                        'significant': h_p < 0.05
+        return results
+
+    def group_comparisons(self):
+        """Grup karşılaştırmaları"""
+        self.logger.info("⚖️ Grup karşılaştırmaları yapılıyor...")
+
+        if self.dp.cleaned_data is None:
+            self.logger.warning("⚠️ Temizlenmiş veri bulunamadı")
+            return {}
+
+        results = {}
+
+        # Katılımcı bazlı başarı oranları
+        participant_stats = self.dp.cleaned_data.groupby(['participant_id', 'group'])['is_correct'].mean().reset_index()
+
+        # Uzman vs Resident karşılaştırması
+        uzman_scores = participant_stats[participant_stats['group'] == 'Uzman']['is_correct']
+        resident_scores = participant_stats[participant_stats['group'] == 'Resident']['is_correct']
+
+        if len(uzman_scores) > 0 and len(resident_scores) > 0:
+            # Normallik testi
+            uzman_normal = shapiro(uzman_scores)[1] > 0.05 if len(uzman_scores) > 3 else False
+            resident_normal = shapiro(resident_scores)[1] > 0.05 if len(resident_scores) > 3 else False
+
+            if uzman_normal and resident_normal:
+                # T-test
+                t_stat, p_value = ttest_ind(uzman_scores, resident_scores)
+                test_name = "Bağımsız Örneklem t-Testi"
+            else:
+                # Mann-Whitney U
+                u_stat, p_value = mannwhitneyu(uzman_scores, resident_scores, alternative='two-sided')
+                test_name = "Mann-Whitney U Testi"
+                t_stat = u_stat
+
+            # Effect size (Cohen's d)
+            pooled_std = np.sqrt(((len(uzman_scores) - 1) * uzman_scores.var() +
+                                  (len(resident_scores) - 1) * resident_scores.var()) /
+                                 (len(uzman_scores) + len(resident_scores) - 2))
+            cohens_d = (uzman_scores.mean() - resident_scores.mean()) / pooled_std if pooled_std > 0 else 0
+
+            results['uzman_vs_resident'] = {
+                'test_name': test_name,
+                'statistic': t_stat,
+                'p_value': p_value,
+                'significant': p_value < CONFIG['analysis']['significance_level'],
+                'uzman_mean': uzman_scores.mean(),
+                'uzman_std': uzman_scores.std(),
+                'uzman_n': len(uzman_scores),
+                'resident_mean': resident_scores.mean(),
+                'resident_std': resident_scores.std(),
+                'resident_n': len(resident_scores),
+                'cohens_d': cohens_d,
+                'effect_size_interpretation': self._interpret_effect_size(abs(cohens_d))
+            }
+
+            self.logger.info(f"📈 Uzman vs Resident: p={p_value:.4f}, Cohen's d={cohens_d:.3f}")
+
+        # Zaman karşılaştırması (eğer mevcut ise)
+        if 'total_time_spent' in self.dp.participant_data.columns:
+            time_comparison = self._compare_time_performance()
+            results['time_comparison'] = time_comparison
+
+        self.results['group_comparisons'] = results
+        return results
+
+    def model_vs_human_analysis(self):
+        """Model vs İnsan analizi"""
+        self.logger.info("🤖👨‍⚕️ Model vs İnsan analizi yapılıyor...")
+
+        if self.dp.merged_data is None:
+            self.logger.warning("⚠️ Birleştirilmiş veri bulunamadı")
+            return {}
+
+        results = {}
+
+        # Soru bazlı karşılaştırma
+        question_performance = self.dp.merged_data.groupby('question_id').agg({
+            'is_correct': 'mean',
+            'model_correct': 'first'
+        }).dropna()
+
+        if len(question_performance) > 0:
+            human_acc = question_performance['is_correct']
+            model_acc = question_performance['model_correct']
+
+            # Paired t-test
+            t_stat, p_value = ttest_rel(human_acc, model_acc)
+
+            results['question_based'] = {
+                'test_name': 'Paired t-Test (Soru Bazlı)',
+                't_statistic': t_stat,
+                'p_value': p_value,
+                'significant': p_value < CONFIG['analysis']['significance_level'],
+                'human_mean': human_acc.mean(),
+                'model_mean': model_acc.mean(),
+                'difference': model_acc.mean() - human_acc.mean(),
+                'questions_analyzed': len(question_performance)
+            }
+
+        # Sınıf bazlı karşılaştırma
+        class_performance = self.dp.merged_data.groupby('true_class').agg({
+            'is_correct': 'mean',
+            'model_correct': 'mean'
+        })
+
+        results['class_based'] = {}
+        for class_name in class_performance.index:
+            human_perf = class_performance.loc[class_name, 'is_correct']
+            model_perf = class_performance.loc[class_name, 'model_correct']
+
+            results['class_based'][class_name] = {
+                'human_accuracy': human_perf,
+                'model_accuracy': model_perf,
+                'difference': model_perf - human_perf,
+                'class_name_tr': CONFIG['classes'].get(class_name, class_name)
+            }
+
+        # Genel karşılaştırma
+        overall_human = self.dp.merged_data['is_correct'].mean()
+        overall_model = self.dp.merged_data['model_correct'].mean()
+
+        results['overall'] = {
+            'human_accuracy': overall_human,
+            'model_accuracy': overall_model,
+            'difference': overall_model - overall_human,
+            'improvement_percentage': (
+                        (overall_model - overall_human) / overall_human * 100) if overall_human > 0 else 0
+        }
+
+        self.results['model_vs_human'] = results
+        self.logger.info(f"🎯 Genel karşılaştırma: İnsan={overall_human:.3f}, Model={overall_model:.3f}")
+
+        return results
+
+    def correlation_analysis(self):
+        """Korelasyon analizi"""
+        self.logger.info("📈 Korelasyon analizi yapılıyor...")
+
+        results = {}
+
+        if self.dp.participant_data is not None:
+            # Deneyim ile performans korelasyonu
+            if 'experience' in self.dp.participant_data.columns:
+                # Experience string değerlerini numerik'e çevir
+                exp_numeric = self._convert_experience_to_numeric(self.dp.participant_data['experience'])
+
+                if exp_numeric is not None:
+                    correlation, p_value = pearsonr(exp_numeric, self.dp.participant_data['success_rate'])
+
+                    results['experience_performance'] = {
+                        'correlation': correlation,
+                        'p_value': p_value,
+                        'significant': p_value < CONFIG['analysis']['significance_level'],
+                        'interpretation': self._interpret_correlation(correlation)
                     }
 
-        self.results['experience'] = results
+        # Sınıf zorluk analizi
+        if self.dp.merged_data is not None:
+            class_difficulty = self.dp.merged_data.groupby('true_class')['is_correct'].mean()
+            model_class_perf = self.dp.merged_data.groupby('true_class')['model_correct'].mean()
+
+            # Sınıf zorluk-model performans korelasyonu
+            common_classes = class_difficulty.index.intersection(model_class_perf.index)
+            if len(common_classes) > 2:
+                corr, p_val = pearsonr(
+                    class_difficulty.loc[common_classes],
+                    model_class_perf.loc[common_classes]
+                )
+
+                results['class_difficulty_model'] = {
+                    'correlation': corr,
+                    'p_value': p_val,
+                    'significant': p_val < CONFIG['analysis']['significance_level']
+                }
+
+        self.results['correlations'] = results
         return results
+
+    def advanced_statistical_tests(self):
+        """İleri düzey istatistiksel testler"""
+        self.logger.info("🔬 İleri düzey istatistiksel testler yapılıyor...")
+
+        results = {}
+
+        # Çoklu karşılaştırma düzeltmesi için p-değerlerini topla
+        p_values = []
+        test_names = []
+
+        # McNemar testi (Model vs İnsan için)
+        if self.dp.merged_data is not None:
+            mcnemar_table = self._create_mcnemar_table()
+            if mcnemar_table is not None:
+                try:
+                    mcnemar_result = mcnemar(mcnemar_table, exact=False)
+                    results['mcnemar_test'] = {
+                        'statistic': mcnemar_result.statistic,
+                        'p_value': mcnemar_result.pvalue,
+                        'significant': mcnemar_result.pvalue < CONFIG['analysis']['significance_level']
+                    }
+                    p_values.append(mcnemar_result.pvalue)
+                    test_names.append('McNemar Test')
+                except Exception as e:
+                    self.logger.warning(f"McNemar testi hesaplanamadı: {e}")
+
+        # Bonferroni düzeltmesi
+        if p_values:
+            alpha = CONFIG['analysis']['significance_level']
+            bonferroni_alpha = alpha / len(p_values)
+            results['multiple_comparison_correction'] = {
+                'original_alpha': alpha,
+                'bonferroni_alpha': bonferroni_alpha,
+                'adjusted_results': {}
+            }
+
+            for i, (test_name, p_val) in enumerate(zip(test_names, p_values)):
+                results['multiple_comparison_correction']['adjusted_results'][test_name] = {
+                    'original_p': p_val,
+                    'significant_bonferroni': p_val < bonferroni_alpha
+                }
+
+        self.results['advanced_tests'] = results
+        return results
+
+    def _interpret_effect_size(self, cohens_d):
+        """Cohen's d etki boyutunu yorumla"""
+        if cohens_d < 0.2:
+            return "Çok küçük etki"
+        elif cohens_d < 0.5:
+            return "Küçük etki"
+        elif cohens_d < 0.8:
+            return "Orta etki"
+        else:
+            return "Büyük etki"
+
+    def _interpret_correlation(self, r):
+        """Korelasyon katsayısını yorumla"""
+        abs_r = abs(r)
+        if abs_r < 0.3:
+            strength = "Zayıf"
+        elif abs_r < 0.7:
+            strength = "Orta"
+        else:
+            strength = "Güçlü"
+
+        direction = "Pozitif" if r > 0 else "Negatif"
+        return f"{strength} {direction}"
+
+    def _convert_experience_to_numeric(self, experience_col):
+        """Deneyim sütununu numerik'e çevir"""
+        try:
+            numeric_exp = []
+            for exp in experience_col:
+                if pd.isna(exp):
+                    numeric_exp.append(np.nan)
+                elif exp == '<1':
+                    numeric_exp.append(0.5)
+                elif '-' in str(exp):
+                    # "1-2", "3-5" gibi formatlar
+                    parts = str(exp).split('-')
+                    if len(parts) == 2:
+                        numeric_exp.append((float(parts[0]) + float(parts[1])) / 2)
+                    else:
+                        numeric_exp.append(np.nan)
+                elif '+' in str(exp):
+                    # "10+" gibi formatlar
+                    numeric_exp.append(float(str(exp).replace('+', '')))
+                else:
+                    try:
+                        numeric_exp.append(float(exp))
+                    except:
+                        numeric_exp.append(np.nan)
+
+            return pd.Series(numeric_exp).dropna()
+        except Exception as e:
+            self.logger.warning(f"Deneyim dönüşüm hatası: {e}")
+            return None
+
+    def _compare_time_performance(self):
+        """Zaman performansı karşılaştırması"""
+        time_by_group = self.dp.participant_data.groupby('group')['total_time_spent'].agg(['mean', 'std', 'count'])
+
+        uzman_time = self.dp.participant_data[self.dp.participant_data['group'] == 'Uzman']['total_time_spent']
+        resident_time = self.dp.participant_data[self.dp.participant_data['group'] == 'Resident']['total_time_spent']
+
+        if len(uzman_time) > 0 and len(resident_time) > 0:
+            t_stat, p_value = ttest_ind(uzman_time, resident_time)
+
+            return {
+                'test_name': 'Bağımsız Örneklem t-Testi (Süre)',
+                't_statistic': t_stat,
+                'p_value': p_value,
+                'significant': p_value < CONFIG['analysis']['significance_level'],
+                'uzman_mean_time': uzman_time.mean(),
+                'resident_mean_time': resident_time.mean(),
+                'time_difference': uzman_time.mean() - resident_time.mean()
+            }
+        return None
+
+    def _create_mcnemar_table(self):
+        """McNemar testi için kontenjans tablosu oluştur"""
+        try:
+            # Model ve insan kararlarını karşılaştır
+            human_correct = self.dp.merged_data['is_correct']
+            model_correct = self.dp.merged_data['model_correct']
+
+            # 2x2 tablo oluştur
+            both_correct = ((human_correct == True) & (model_correct == True)).sum()
+            human_only = ((human_correct == True) & (model_correct == False)).sum()
+            model_only = ((human_correct == False) & (model_correct == True)).sum()
+            both_wrong = ((human_correct == False) & (model_correct == False)).sum()
+
+            table = np.array([[both_correct, human_only],
+                              [model_only, both_wrong]])
+
+            return table
+        except Exception as e:
+            self.logger.warning(f"McNemar tablosu oluşturulamadı: {e}")
+            return None
 
 
 # =============================================================================
 # VISUALIZATION CLASS
 # =============================================================================
-class Visualizer:
+
+class DermatologyVisualizer:
     """Görselleştirme sınıfı"""
 
     def __init__(self, data_processor, analyzer):
         self.dp = data_processor
         self.analyzer = analyzer
+        self.logger = logging.getLogger(__name__)
         self.output_dir = Path(CONFIG['paths']['output_dir'])
-        self.output_dir.mkdir(exist_ok=True)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def create_overall_comparison(self):
-        """Genel karşılaştırma grafiği"""
-        print("📊 Genel karşılaştırma grafiği oluşturuluyor...")
+        # Türkçe font ayarları
+        plt.rcParams['font.size'] = 12
+        plt.rcParams['axes.labelsize'] = 12
+        plt.rcParams['axes.titlesize'] = 14
+        plt.rcParams['legend.fontsize'] = 11
+        plt.rcParams['xtick.labelsize'] = 10
+        plt.rcParams['ytick.labelsize'] = 10
 
-        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-        fig.suptitle('Dermatoloji Testi - Genel Performans Karşılaştırması', fontsize=16, fontweight='bold')
-
-        # 1. Model vs Katılımcı başarı oranları
-        if 'overall' in self.analyzer.results:
-            ax1 = axes[0, 0]
-
-            model_acc = self.analyzer.results['overall'].get('model', {}).get('accuracy', 0)
-            human_acc = self.analyzer.results['overall'].get('participants', {}).get('average_accuracy', 0)
-
-            categories = ['Model\n(AI)', 'İnsan\n(Ortalama)']
-            accuracies = [model_acc, human_acc]
-            colors = [CONFIG['colors']['model'], CONFIG['colors']['neutral']]
-
-            bars = ax1.bar(categories, accuracies, color=colors, alpha=0.8)
-            ax1.set_ylabel('Başarı Oranı')
-            ax1.set_title('Model vs İnsan Performansı')
-            ax1.set_ylim(0, 1)
-
-            # Değerleri göster
-            for bar, acc in zip(bars, accuracies):
-                height = bar.get_height()
-                ax1.text(bar.get_x() + bar.get_width() / 2., height + 0.01,
-                         f'{acc:.3f}', ha='center', va='bottom', fontweight='bold')
-
-        # 2. Uzman vs Asistan karşılaştırması
-        if 'group' in self.dp.participant_data.columns:
-            ax2 = axes[0, 1]
-
-            group_stats = self.dp.participant_data.groupby('group')['is_correct'].mean()
-
-            bars = ax2.bar(group_stats.index, group_stats.values,
-                           color=[CONFIG['colors']['uzman'], CONFIG['colors']['asistan']], alpha=0.8)
-            ax2.set_ylabel('Başarı Oranı')
-            ax2.set_title('Uzman vs Asistan Performansı')
-            ax2.set_ylim(0, 1)
-
-            for bar, val in zip(bars, group_stats.values):
-                height = bar.get_height()
-                ax2.text(bar.get_x() + bar.get_width() / 2., height + 0.01,
-                         f'{val:.3f}', ha='center', va='bottom', fontweight='bold')
-
-        # 3. Sınıf bazlı başarı oranları
-        if self.dp.merged_data is not None:
-            ax3 = axes[1, 0]
-
-            class_stats = self.dp.merged_data.groupby('true_class')['is_correct'].mean().sort_values()
-
-            bars = ax3.barh(range(len(class_stats)), class_stats.values, color=CONFIG['colors']['success'], alpha=0.7)
-            ax3.set_yticks(range(len(class_stats)))
-            ax3.set_yticklabels([CONFIG['classes'].get(cls, cls) for cls in class_stats.index])
-            ax3.set_xlabel('Başarı Oranı')
-            ax3.set_title('Hastalık Sınıfı Bazlı Başarı Oranları')
-
-            for i, val in enumerate(class_stats.values):
-                ax3.text(val + 0.01, i, f'{val:.3f}', va='center', fontweight='bold')
-
-        # 4. Katılımcı başarı dağılımı
-        if self.dp.participant_data is not None:
-            ax4 = axes[1, 1]
-
-            participant_accuracies = self.dp.participant_data.groupby('participant_id')['is_correct'].mean()
-
-            ax4.hist(participant_accuracies, bins=20, color=CONFIG['colors']['neutral'], alpha=0.7, edgecolor='black')
-            ax4.axvline(participant_accuracies.mean(), color=CONFIG['colors']['error'],
-                        linestyle='--', linewidth=2, label=f'Ortalama: {participant_accuracies.mean():.3f}')
-            ax4.set_xlabel('Başarı Oranı')
-            ax4.set_ylabel('Katılımcı Sayısı')
-            ax4.set_title('Katılımcı Başarı Oranı Dağılımı')
-            ax4.legend()
-
-        plt.tight_layout()
-        plt.savefig(self.output_dir / 'genel_karsilastirma.png', dpi=300, bbox_inches='tight')
-        plt.close()
-
-        print(f"✅ Genel karşılaştırma grafiği kaydedildi: {self.output_dir / 'genel_karsilastirma.png'}")
-
-    def create_class_wise_analysis(self):
-        """Sınıf bazlı detaylı analiz"""
-        print("📊 Sınıf bazlı analiz grafiği oluşturuluyor...")
+    def create_main_comparison_chart(self):
+        """Ana karşılaştırma grafiği: 8 sınıf bazlı AI + Resident + Uzman"""
+        self.logger.info("📊 Ana karşılaştırma grafiği oluşturuluyor...")
 
         if self.dp.merged_data is None:
-            print("⚠️ Birleştirilmiş veri bulunamadı, sınıf bazlı analiz atlanıyor")
+            self.logger.warning("⚠️ Birleştirilmiş veri bulunamadı")
             return
 
-        # Sınıf sayısına göre grid boyutunu belirle
-        n_classes = len(CONFIG['classes'])
-        ncols = 3
-        nrows = (n_classes + ncols - 1) // ncols
+        # Sınıf bazlı performansları hesapla
+        class_performance = {}
 
-        fig, axes = plt.subplots(nrows, ncols, figsize=(18, 6 * nrows))
-        fig.suptitle('Hastalık Sınıfı Bazlı Detaylı Performans Analizi', fontsize=16, fontweight='bold')
-
-        if nrows == 1:
-            axes = axes.reshape(1, -1)
-
-        class_list = list(CONFIG['classes'].keys())
-
-        for idx, class_code in enumerate(class_list):
-            row = idx // ncols
-            col = idx % ncols
-            ax = axes[row, col]
-
+        for class_code in CONFIG['classes'].keys():
             class_data = self.dp.merged_data[self.dp.merged_data['true_class'] == class_code]
 
             if len(class_data) > 0:
-                # Model vs Grup karşılaştırması
+                # Model performansı
                 model_acc = class_data['model_correct'].mean()
-                group_stats = class_data.groupby('group')['is_correct'].mean()
 
-                # Bar plot
-                categories = ['Model'] + list(group_stats.index)
-                accuracies = [model_acc] + list(group_stats.values)
-                colors = [CONFIG['colors']['model']] + [
-                    CONFIG['colors']['uzman'] if 'Uzman' in cat else CONFIG['colors']['asistan'] for cat in
-                    group_stats.index]
+                # Uzman performansı
+                uzman_data = class_data[class_data['group'] == 'Uzman']
+                uzman_acc = uzman_data['is_correct'].mean() if len(uzman_data) > 0 else 0
 
-                bars = ax.bar(categories, accuracies, color=colors, alpha=0.8)
-                ax.set_title(f'{CONFIG["classes"][class_code]}\n({len(class_data)} soru)', fontweight='bold')
-                ax.set_ylabel('Başarı Oranı')
-                ax.set_ylim(0, 1)
+                # Resident performansı
+                resident_data = class_data[class_data['group'] == 'Resident']
+                resident_acc = resident_data['is_correct'].mean() if len(resident_data) > 0 else 0
 
-                # Değerleri göster
-                for bar, acc in zip(bars, accuracies):
-                    height = bar.get_height()
-                    ax.text(bar.get_x() + bar.get_width() / 2., height + 0.02,
-                            f'{acc:.3f}', ha='center', va='bottom', fontweight='bold', fontsize=9)
+                class_performance[class_code] = {
+                    'model': model_acc,
+                    'uzman': uzman_acc,
+                    'resident': resident_acc,
+                    'class_name': CONFIG['classes'][class_code]
+                }
 
-                # X etiketlerini döndür
-                ax.tick_params(axis='x', rotation=45)
-            else:
-                ax.text(0.5, 0.5, 'Veri Yok', ha='center', va='center', transform=ax.transAxes)
-                ax.set_title(f'{CONFIG["classes"][class_code]}', fontweight='bold')
+        # Grafik oluştur
+        fig, ax = plt.subplots(figsize=(16, 10))
 
-        # Boş grafikleri gizle
-        for idx in range(n_classes, nrows * ncols):
-            row = idx // ncols
-            col = idx % ncols
-            axes[row, col].set_visible(False)
+        classes = list(class_performance.keys())
+        class_names = [class_performance[cls]['class_name'] for cls in classes]
 
-        plt.tight_layout()
-        plt.savefig(self.output_dir / 'sinif_bazli_analiz.png', dpi=300, bbox_inches='tight')
-        plt.close()
+        x = np.arange(len(classes))
+        width = 0.25
 
-        print(f"✅ Sınıf bazlı analiz grafiği kaydedildi: {self.output_dir / 'sinif_bazli_analiz.png'}")
+        model_scores = [class_performance[cls]['model'] for cls in classes]
+        uzman_scores = [class_performance[cls]['uzman'] for cls in classes]
+        resident_scores = [class_performance[cls]['resident'] for cls in classes]
 
-    def create_confusion_matrices(self):
-        """Karışıklık matrisleri"""
-        print("📊 Karışıklık matrisleri oluşturuluyor...")
+        bars1 = ax.bar(x - width, model_scores, width, label='Yapay Zeka (AI)',
+                       color=CONFIG['colors']['model'], alpha=0.8)
+        bars2 = ax.bar(x, uzman_scores, width, label='Uzman Doktor',
+                       color=CONFIG['colors']['uzman'], alpha=0.8)
+        bars3 = ax.bar(x + width, resident_scores, width, label='Asistan Doktor',
+                       color=CONFIG['colors']['resident'], alpha=0.8)
 
-        if self.dp.merged_data is None:
-            print("⚠️ Birleştirilmiş veri bulunamadı, karışıklık matrisleri atlanıyor")
-            return
+        # Değerleri göster
+        for i, (m, u, r) in enumerate(zip(model_scores, uzman_scores, resident_scores)):
+            ax.text(i - width, m + 0.02, f'{m:.2f}', ha='center', va='bottom', fontweight='bold', fontsize=9)
+            ax.text(i, u + 0.02, f'{u:.2f}', ha='center', va='bottom', fontweight='bold', fontsize=9)
+            ax.text(i + width, r + 0.02, f'{r:.2f}', ha='center', va='bottom', fontweight='bold', fontsize=9)
 
-        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-        fig.suptitle('Karışıklık Matrisleri Karşılaştırması', fontsize=16, fontweight='bold')
+        ax.set_xlabel('Dermatolojik Hastalık Sınıfları', fontsize=14, fontweight='bold')
+        ax.set_ylabel('Başarı Oranı (Doğruluk)', fontsize=14, fontweight='bold')
+        ax.set_title('Yapay Zeka vs İnsan Uzman Performans Karşılaştırması\n(8 Dermatolojik Hastalık Sınıfı Bazında)',
+                     fontsize=16, fontweight='bold', pad=20)
 
-        class_labels = [CONFIG['classes'][cls] for cls in CONFIG['classes'].keys()]
+        ax.set_xticks(x)
+        ax.set_xticklabels(class_names, rotation=45, ha='right')
+        ax.set_ylim(0, 1.1)
+        ax.legend(loc='upper right', fontsize=12)
+        ax.grid(True, alpha=0.3, axis='y')
 
-        # 1. Model karışıklık matrisi
-        if 'model_correct' in self.dp.merged_data.columns:
-            # Model predictions vs true labels
-            y_true = self.dp.merged_data['true_class']
-            # Bu örnek için model_correct boolean, gerçek implementation'da prediction labels olacak
-            y_pred_model = self.dp.merged_data['true_class'].where(self.dp.merged_data['model_correct'], 'wrong')
-
-            # Sadece doğru tahminleri göster (basitleştirilmiş)
-            model_accuracy = self.dp.merged_data.groupby('true_class')['model_correct'].mean()
-
-            ax1 = axes[0]
-            bars = ax1.bar(range(len(model_accuracy)), model_accuracy.values, color=CONFIG['colors']['model'],
-                           alpha=0.8)
-            ax1.set_title('Model Sınıf Bazlı Başarı', fontweight='bold')
-            ax1.set_xlabel('Hastalık Sınıfı')
-            ax1.set_ylabel('Başarı Oranı')
-            ax1.set_xticks(range(len(model_accuracy)))
-            ax1.set_xticklabels([CONFIG['classes'][cls] for cls in model_accuracy.index], rotation=45, ha='right')
-
-            for bar, val in zip(bars, model_accuracy.values):
-                height = bar.get_height()
-                ax1.text(bar.get_x() + bar.get_width() / 2., height + 0.01,
-                         f'{val:.3f}', ha='center', va='bottom', fontweight='bold', fontsize=9)
-
-        # 2. Uzman karışıklık matrisi
-        uzman_data = self.dp.merged_data[self.dp.merged_data['group'] == 'Uzman']
-        if len(uzman_data) > 0:
-            uzman_accuracy = uzman_data.groupby('true_class')['is_correct'].mean()
-
-            ax2 = axes[1]
-            bars = ax2.bar(range(len(uzman_accuracy)), uzman_accuracy.values, color=CONFIG['colors']['uzman'],
-                           alpha=0.8)
-            ax2.set_title('Uzman Sınıf Bazlı Başarı', fontweight='bold')
-            ax2.set_xlabel('Hastalık Sınıfı')
-            ax2.set_ylabel('Başarı Oranı')
-            ax2.set_xticks(range(len(uzman_accuracy)))
-            ax2.set_xticklabels([CONFIG['classes'][cls] for cls in uzman_accuracy.index], rotation=45, ha='right')
-
-            for bar, val in zip(bars, uzman_accuracy.values):
-                height = bar.get_height()
-                ax2.text(bar.get_x() + bar.get_width() / 2., height + 0.01,
-                         f'{val:.3f}', ha='center', va='bottom', fontweight='bold', fontsize=9)
-
-        # 3. Asistan karışıklık matrisi
-        asistan_data = self.dp.merged_data[self.dp.merged_data['group'] == 'Asistan']
-        if len(asistan_data) > 0:
-            asistan_accuracy = asistan_data.groupby('true_class')['is_correct'].mean()
-
-            ax3 = axes[2]
-            bars = ax3.bar(range(len(asistan_accuracy)), asistan_accuracy.values, color=CONFIG['colors']['asistan'],
-                           alpha=0.8)
-            ax3.set_title('Asistan Sınıf Bazlı Başarı', fontweight='bold')
-            ax3.set_xlabel('Hastalık Sınıfı')
-            ax3.set_ylabel('Başarı Oranı')
-            ax3.set_xticks(range(len(asistan_accuracy)))
-            ax3.set_xticklabels([CONFIG['classes'][cls] for cls in asistan_accuracy.index], rotation=45, ha='right')
-
-            for bar, val in zip(bars, asistan_accuracy.values):
-                height = bar.get_height()
-                ax3.text(bar.get_x() + bar.get_width() / 2., height + 0.01,
-                         f'{val:.3f}', ha='center', va='bottom', fontweight='bold', fontsize=9)
+        # Y ekseni formatı
+        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f'{y:.1f}'))
 
         plt.tight_layout()
-        plt.savefig(self.output_dir / 'karisikhk_matrisleri.png', dpi=300, bbox_inches='tight')
+
+        output_path = self.output_dir / 'ana_karsilastirma_8_sinif.png'
+        plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='white')
         plt.close()
 
-        print(f"✅ Karışıklık matrisleri kaydedildi: {self.output_dir / 'karisikhk_matrisleri.png'}")
+        self.logger.info(f"✅ Ana karşılaştırma grafiği kaydedildi: {output_path}")
 
-    def create_experience_analysis(self):
-        """Deneyim analizi grafikleri"""
-        print("📊 Deneyim analizi grafikleri oluşturuluyor...")
+    def create_participant_distribution_charts(self):
+        """Katılımcı dağılım grafikleri"""
+        self.logger.info("👥 Katılımcı dağılım grafikleri oluşturuluyor...")
 
         fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-        fig.suptitle('Deneyim Süresi ve Başarı Oranı Analizi', fontsize=16, fontweight='bold')
+        fig.suptitle('Katılımcı Demografik Dağılımları', fontsize=16, fontweight='bold')
 
-        # 1. Deneyim yılı vs başarı oranı scatter plot
-        if 'experience_years' in self.dp.participant_data.columns:
-            ax1 = axes[0, 0]
+        # 1. Grup dağılımı
+        ax1 = axes[0, 0]
+        group_counts = self.dp.participant_data['group'].value_counts()
 
-            participant_stats = self.dp.participant_data.groupby('participant_id').agg({
-                'is_correct': 'mean',
-                'experience_years': 'first',
-                'group': 'first'
-            })
+        colors = [CONFIG['colors']['uzman'] if 'Uzman' in group else
+                  CONFIG['colors']['resident'] if 'Resident' in group else
+                  CONFIG['colors']['neutral'] for group in group_counts.index]
 
-            for group in participant_stats['group'].unique():
-                group_data = participant_stats[participant_stats['group'] == group]
-                color = CONFIG['colors']['uzman'] if group == 'Uzman' else CONFIG['colors']['asistan']
-                ax1.scatter(group_data['experience_years'], group_data['is_correct'],
-                            color=color, alpha=0.7, label=group, s=50)
+        wedges, texts, autotexts = ax1.pie(group_counts.values, labels=group_counts.index,
+                                           autopct='%1.1f%%', colors=colors, startangle=90)
+        ax1.set_title('Katılımcı Grup Dağılımı', fontweight='bold')
 
-            # Trend line
-            if len(participant_stats) > 1:
-                z = np.polyfit(participant_stats['experience_years'], participant_stats['is_correct'], 1)
-                p = np.poly1d(z)
-                ax1.plot(participant_stats['experience_years'], p(participant_stats['experience_years']),
-                         "r--", alpha=0.8, linewidth=2)
+        # 2. Position dağılımı
+        ax2 = axes[0, 1]
+        if 'position' in self.dp.participant_data.columns:
+            position_counts = self.dp.participant_data['position'].value_counts().head(6)
+            bars = ax2.bar(range(len(position_counts)), position_counts.values,
+                           color=CONFIG['colors']['neutral'], alpha=0.7)
+            ax2.set_xticks(range(len(position_counts)))
+            ax2.set_xticklabels(position_counts.index, rotation=45, ha='right')
+            ax2.set_ylabel('Katılımcı Sayısı')
+            ax2.set_title('Pozisyon Dağılımı', fontweight='bold')
 
-            ax1.set_xlabel('Deneyim Yılı')
-            ax1.set_ylabel('Başarı Oranı')
-            ax1.set_title('Deneyim Yılı vs Başarı Oranı')
-            ax1.legend()
-            ax1.grid(True, alpha=0.3)
+            # Değerleri göster
+            for bar, val in zip(bars, position_counts.values):
+                height = bar.get_height()
+                ax2.text(bar.get_x() + bar.get_width() / 2., height + 0.5,
+                         str(int(val)), ha='center', va='bottom', fontweight='bold')
 
-        # 2. Deneyim grupları boxplot
-        if 'group' in self.dp.participant_data.columns:
-            ax2 = axes[0, 1]
+        # 3. Başarı oranı dağılımı
+        ax3 = axes[1, 0]
+        ax3.hist(self.dp.participant_data['success_rate'], bins=20,
+                 color=CONFIG['colors']['neutral'], alpha=0.7, edgecolor='black')
+        ax3.axvline(self.dp.participant_data['success_rate'].mean(),
+                    color=CONFIG['colors']['error'], linestyle='--', linewidth=2,
+                    label=f'Ortalama: {self.dp.participant_data["success_rate"].mean():.3f}')
+        ax3.set_xlabel('Başarı Oranı')
+        ax3.set_ylabel('Katılımcı Sayısı')
+        ax3.set_title('Başarı Oranı Dağılımı', fontweight='bold')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
 
-            participant_accuracies = self.dp.participant_data.groupby(['participant_id', 'group'])[
+        # 4. Deneyim dağılımı
+        ax4 = axes[1, 1]
+        if 'experience' in self.dp.participant_data.columns:
+            exp_counts = self.dp.participant_data['experience'].value_counts()
+            bars = ax4.bar(range(len(exp_counts)), exp_counts.values,
+                           color=CONFIG['colors']['success'], alpha=0.7)
+            ax4.set_xticks(range(len(exp_counts)))
+            ax4.set_xticklabels(exp_counts.index, rotation=45, ha='right')
+            ax4.set_ylabel('Katılımcı Sayısı')
+            ax4.set_title('Deneyim Süresi Dağılımı', fontweight='bold')
+
+        plt.tight_layout()
+
+        output_path = self.output_dir / 'katilimci_dagilim.png'
+        plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='white')
+        plt.close()
+
+        self.logger.info(f"✅ Katılımcı dağılım grafikleri kaydedildi: {output_path}")
+
+    def create_performance_boxplots(self):
+        """Performans kutu grafikleri"""
+        self.logger.info("📦 Performans kutu grafikleri oluşturuluyor...")
+
+        fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+        fig.suptitle('Grup Bazlı Performans Karşılaştırması', fontsize=16, fontweight='bold')
+
+        # Katılımcı bazlı başarı oranları
+        if self.dp.cleaned_data is not None:
+            participant_perf = self.dp.cleaned_data.groupby(['participant_id', 'group'])[
                 'is_correct'].mean().reset_index()
 
-            groups = participant_accuracies['group'].unique()
-            group_data = [participant_accuracies[participant_accuracies['group'] == group]['is_correct'] for group in
-                          groups]
+            # 1. Başarı oranı kutu grafik
+            ax1 = axes[0]
+            groups = participant_perf['group'].unique()
+            group_data = [participant_perf[participant_perf['group'] == group]['is_correct'] for group in groups]
 
-            bp = ax2.boxplot(group_data, labels=groups, patch_artist=True)
+            bp1 = ax1.boxplot(group_data, labels=groups, patch_artist=True)
 
-            colors = [CONFIG['colors']['uzman'] if 'Uzman' in group else CONFIG['colors']['asistan'] for group in
-                      groups]
-            for patch, color in zip(bp['boxes'], colors):
+            colors = [CONFIG['colors']['uzman'] if 'Uzman' in group else
+                      CONFIG['colors']['resident'] if 'Resident' in group else
+                      CONFIG['colors']['neutral'] for group in groups]
+
+            for patch, color in zip(bp1['boxes'], colors):
                 patch.set_facecolor(color)
                 patch.set_alpha(0.7)
 
-            ax2.set_ylabel('Başarı Oranı')
-            ax2.set_title('Deneyim Grupları Başarı Dağılımı')
-            ax2.grid(True, alpha=0.3)
+            ax1.set_ylabel('Başarı Oranı')
+            ax1.set_title('Grup Bazlı Başarı Oranı Dağılımı', fontweight='bold')
+            ax1.grid(True, alpha=0.3)
 
-        # 3. Soru zorluğu analizi
-        if self.dp.merged_data is not None:
-            ax3 = axes[1, 0]
+        # 2. Zaman karşılaştırması (eğer mevcut ise)
+        ax2 = axes[1]
+        if 'total_time_spent' in self.dp.participant_data.columns:
+            time_by_group = []
+            group_labels = []
 
-            question_difficulty = self.dp.merged_data.groupby('question_id')['is_correct'].mean()
+            for group in self.dp.participant_data['group'].unique():
+                group_times = self.dp.participant_data[self.dp.participant_data['group'] == group]['total_time_spent']
+                if len(group_times) > 0:
+                    time_by_group.append(group_times)
+                    group_labels.append(group)
 
-            ax3.hist(question_difficulty, bins=20, color=CONFIG['colors']['neutral'], alpha=0.7, edgecolor='black')
-            ax3.axvline(question_difficulty.mean(), color=CONFIG['colors']['error'],
-                        linestyle='--', linewidth=2, label=f'Ortalama: {question_difficulty.mean():.3f}')
-            ax3.set_xlabel('Soru Başarı Oranı')
-            ax3.set_ylabel('Soru Sayısı')
-            ax3.set_title('Soru Zorluğu Dağılımı')
-            ax3.legend()
-            ax3.grid(True, alpha=0.3)
+            if time_by_group:
+                bp2 = ax2.boxplot(time_by_group, labels=group_labels, patch_artist=True)
 
-        # 4. Model vs İnsan soru bazlı karşılaştırma
-        if self.dp.merged_data is not None:
-            ax4 = axes[1, 1]
+                for patch, group in zip(bp2['boxes'], group_labels):
+                    color = (CONFIG['colors']['uzman'] if 'Uzman' in group else
+                             CONFIG['colors']['resident'] if 'Resident' in group else
+                             CONFIG['colors']['neutral'])
+                    patch.set_facecolor(color)
+                    patch.set_alpha(0.7)
 
-            question_stats = self.dp.merged_data.groupby('question_id').agg({
-                'is_correct': 'mean',
-                'model_correct': 'first'
-            })
+                ax2.set_ylabel('Tamamlama Süresi (dakika)')
+                ax2.set_title('Grup Bazlı Süre Karşılaştırması', fontweight='bold')
+                ax2.grid(True, alpha=0.3)
+        else:
+            # Alternatif: Sınıf bazlı performans
+            if self.dp.merged_data is not None:
+                class_perf_by_group = self.dp.merged_data.groupby(['true_class', 'group'])['is_correct'].mean().unstack(
+                    fill_value=0)
 
-            ax4.scatter(question_stats['model_correct'], question_stats['is_correct'],
-                        alpha=0.7, color=CONFIG['colors']['model'], s=50)
-            ax4.plot([0, 1], [0, 1], 'r--', alpha=0.8, linewidth=2, label='Eşit Performans')
-            ax4.set_xlabel('Model Başarı Oranı')
-            ax4.set_ylabel('İnsan Başarı Oranı')
-            ax4.set_title('Soru Bazlı Model vs İnsan Karşılaştırması')
-            ax4.legend()
-            ax4.grid(True, alpha=0.3)
+                class_perf_by_group.plot(kind='bar', ax=ax2,
+                                         color=[CONFIG['colors']['uzman'], CONFIG['colors']['resident']])
+                ax2.set_ylabel('Başarı Oranı')
+                ax2.set_title('Sınıf Bazlı Grup Performansı', fontweight='bold')
+                ax2.set_xlabel('Hastalık Sınıfı')
+                ax2.legend(title='Grup')
+                ax2.tick_params(axis='x', rotation=45)
 
         plt.tight_layout()
-        plt.savefig(self.output_dir / 'deneyim_analizi.png', dpi=300, bbox_inches='tight')
+
+        output_path = self.output_dir / 'performans_kutu_grafikler.png'
+        plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='white')
         plt.close()
 
-        print(f"✅ Deneyim analizi grafikleri kaydedildi: {self.output_dir / 'deneyim_analizi.png'}")
+        self.logger.info(f"✅ Performans kutu grafikleri kaydedildi: {output_path}")
 
-    def create_statistical_summary(self):
-        """İstatistiksel özet tablosu"""
-        print("📊 İstatistiksel özet tablosu oluşturuluyor...")
+    def create_confusion_matrices(self):
+        """Karışıklık matrisleri"""
+        self.logger.info("🔲 Karışıklık matrisleri oluşturuluyor...")
 
-        fig, ax = plt.subplots(figsize=(12, 8))
-        fig.suptitle('İstatistiksel Test Sonuçları', fontsize=16, fontweight='bold')
+        if self.dp.merged_data is None:
+            self.logger.warning("⚠️ Birleştirilmiş veri bulunamadı")
+            return
+
+        fig = plt.figure(figsize=(18, 12))
+        gs = GridSpec(2, 3, figure=fig, hspace=0.3, wspace=0.3)
+        fig.suptitle('Sınıf Bazlı Performans Confusion Matrix Karşılaştırması', fontsize=16, fontweight='bold')
+
+        # Sınıf etiketleri
+        class_labels = list(CONFIG['classes'].keys())
+        class_names = [CONFIG['classes'][cls] for cls in class_labels]
+
+        # 1. Model Confusion Matrix
+        ax1 = fig.add_subplot(gs[0, 0])
+        model_cm = self._calculate_confusion_matrix_for_model()
+        if model_cm is not None:
+            sns.heatmap(model_cm, annot=True, fmt='d', cmap='Blues', ax=ax1,
+                        xticklabels=class_names[:model_cm.shape[1]],
+                        yticklabels=class_names[:model_cm.shape[0]])
+            ax1.set_title('Yapay Zeka Modeli\nConfusion Matrix', fontweight='bold')
+            ax1.set_xlabel('Tahmin Edilen')
+            ax1.set_ylabel('Gerçek')
+
+        # 2. Uzman Confusion Matrix
+        ax2 = fig.add_subplot(gs[0, 1])
+        uzman_cm = self._calculate_confusion_matrix_for_group('Uzman')
+        if uzman_cm is not None:
+            sns.heatmap(uzman_cm, annot=True, fmt='d', cmap='Greens', ax=ax2,
+                        xticklabels=class_names[:uzman_cm.shape[1]],
+                        yticklabels=class_names[:uzman_cm.shape[0]])
+            ax2.set_title('Uzman Doktor\nConfusion Matrix', fontweight='bold')
+            ax2.set_xlabel('Tahmin Edilen')
+            ax2.set_ylabel('Gerçek')
+
+        # 3. Resident Confusion Matrix
+        ax3 = fig.add_subplot(gs[0, 2])
+        resident_cm = self._calculate_confusion_matrix_for_group('Resident')
+        if resident_cm is not None:
+            sns.heatmap(resident_cm, annot=True, fmt='d', cmap='Oranges', ax=ax3,
+                        xticklabels=class_names[:resident_cm.shape[1]],
+                        yticklabels=class_names[:resident_cm.shape[0]])
+            ax3.set_title('Asistan Doktor\nConfusion Matrix', fontweight='bold')
+            ax3.set_xlabel('Tahmin Edilen')
+            ax3.set_ylabel('Gerçek')
+
+        # 4-6. Sınıf bazlı doğruluk karşılaştırması
+        ax4 = fig.add_subplot(gs[1, :])
+
+        class_accuracies = {}
+        for class_code in CONFIG['classes'].keys():
+            class_data = self.dp.merged_data[self.dp.merged_data['true_class'] == class_code]
+
+            if len(class_data) > 0:
+                model_acc = class_data['model_correct'].mean()
+                uzman_data = class_data[class_data['group'] == 'Uzman']
+                resident_data = class_data[class_data['group'] == 'Resident']
+
+                class_accuracies[class_code] = {
+                    'model': model_acc,
+                    'uzman': uzman_data['is_correct'].mean() if len(uzman_data) > 0 else 0,
+                    'resident': resident_data['is_correct'].mean() if len(resident_data) > 0 else 0
+                }
+
+        # Sınıf doğruluk çubuk grafik
+        classes = list(class_accuracies.keys())
+        x = np.arange(len(classes))
+        width = 0.25
+
+        model_accs = [class_accuracies[cls]['model'] for cls in classes]
+        uzman_accs = [class_accuracies[cls]['uzman'] for cls in classes]
+        resident_accs = [class_accuracies[cls]['resident'] for cls in classes]
+
+        ax4.bar(x - width, model_accs, width, label='AI Model', color=CONFIG['colors']['model'], alpha=0.8)
+        ax4.bar(x, uzman_accs, width, label='Uzman', color=CONFIG['colors']['uzman'], alpha=0.8)
+        ax4.bar(x + width, resident_accs, width, label='Asistan', color=CONFIG['colors']['resident'], alpha=0.8)
+
+        ax4.set_xlabel('Hastalık Sınıfları')
+        ax4.set_ylabel('Doğruluk Oranı')
+        ax4.set_title('Sınıf Bazlı Doğruluk Karşılaştırması', fontweight='bold')
+        ax4.set_xticks(x)
+        ax4.set_xticklabels([CONFIG['classes'][cls] for cls in classes], rotation=45, ha='right')
+        ax4.legend()
+        ax4.grid(True, alpha=0.3, axis='y')
+
+        plt.tight_layout()
+
+        output_path = self.output_dir / 'confusion_matrix_karsilastirma.png'
+        plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='white')
+        plt.close()
+
+        self.logger.info(f"✅ Confusion matrix grafikleri kaydedildi: {output_path}")
+
+    def create_correlation_heatmap(self):
+        """Korelasyon ısı haritası"""
+        self.logger.info("🔥 Korelasyon ısı haritası oluşturuluyor...")
+
+        # Numerik veriler için korelasyon matrisi oluştur
+        if self.dp.participant_data is not None:
+            # Katılımcı başarı oranları
+            participant_success = self.dp.participant_data.groupby('participant_id')['success_rate'].first()
+
+            # Deneyim verisi (numerik'e çevir)
+            experience_numeric = self.analyzer._convert_experience_to_numeric(self.dp.participant_data['experience'])
+
+            if len(participant_success) > 0 and experience_numeric is not None:
+                # Ortak indeksleri bul
+                common_participants = participant_success.index.intersection(experience_numeric.index)
+
+                if len(common_participants) > 0:
+                    corr_data = pd.DataFrame({
+                        'Başarı_Oranı': participant_success.loc[common_participants],
+                        'Deneyim_Yılı': experience_numeric.loc[common_participants]
+                    })
+
+                    # Sınıf bazlı performansları ekle
+                    if self.dp.merged_data is not None:
+                        for class_code, class_name in CONFIG['classes'].items():
+                            class_performance = self.dp.merged_data[
+                                self.dp.merged_data['true_class'] == class_code
+                                ].groupby('participant_id')['is_correct'].mean()
+
+                            # Ortak katılımcıları bul
+                            common_in_class = corr_data.index.intersection(class_performance.index)
+                            if len(common_in_class) > 0:
+                                corr_data[f'{class_name}_Başarısı'] = class_performance.loc[common_in_class]
+
+                    # Korelasyon matrisi hesapla
+                    correlation_matrix = corr_data.corr()
+
+                    # Isı haritası oluştur
+                    fig, ax = plt.subplots(figsize=(12, 10))
+
+                    mask = np.triu(np.ones_like(correlation_matrix, dtype=bool))
+
+                    sns.heatmap(correlation_matrix, mask=mask, annot=True, cmap='RdYlBu_r', center=0,
+                                square=True, linewidths=.5, cbar_kws={"shrink": .8}, ax=ax,
+                                fmt='.3f', annot_kws={'size': 10})
+
+                    ax.set_title('Performans Parametreleri Korelasyon Matrisi\n(Pearson Korelasyon Katsayıları)',
+                                 fontsize=14, fontweight='bold', pad=20)
+
+                    plt.xticks(rotation=45, ha='right')
+                    plt.yticks(rotation=0)
+                    plt.tight_layout()
+
+                    output_path = self.output_dir / 'korelasyon_isi_haritasi.png'
+                    plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='white')
+                    plt.close()
+
+                    self.logger.info(f"✅ Korelasyon ısı haritası kaydedildi: {output_path}")
+
+    def create_statistical_results_table(self):
+        """İstatistiksel sonuçlar tablosu"""
+        self.logger.info("📋 İstatistiksel sonuçlar tablosu oluşturuluyor...")
+
+        fig, ax = plt.subplots(figsize=(16, 10))
+        fig.suptitle('İstatistiksel Test Sonuçları Özeti', fontsize=16, fontweight='bold')
 
         # Tablo verilerini hazırla
         table_data = []
 
-        if 'statistical_tests' in self.analyzer.results:
-            tests = self.analyzer.results['statistical_tests']
+        # Grup karşılaştırmaları
+        if 'group_comparisons' in self.analyzer.results:
+            comparisons = self.analyzer.results['group_comparisons']
 
-            for test_name, test_results in tests.items():
-                if test_name == 'uzman_vs_asistan':
-                    table_data.append([
-                        'Uzman vs Asistan',
-                        f"{test_results.get('uzman_mean', 0):.3f}",
-                        f"{test_results.get('asistan_mean', 0):.3f}",
-                        f"{test_results.get('p_value', 0):.3f}",
-                        'Anlamlı' if test_results.get('significant', False) else 'Anlamlı Değil'
-                    ])
-                elif test_name == 'model_vs_human':
-                    table_data.append([
-                        'Model vs İnsan',
-                        f"{test_results.get('model_mean', 0):.3f}",
-                        f"{test_results.get('human_mean', 0):.3f}",
-                        f"{test_results.get('p_value', 0):.3f}",
-                        'Anlamlı' if test_results.get('significant', False) else 'Anlamlı Değil'
-                    ])
+            if 'uzman_vs_resident' in comparisons:
+                result = comparisons['uzman_vs_resident']
+                table_data.append([
+                    result['test_name'],
+                    f"Uzman: {result['uzman_mean']:.3f}±{result['uzman_std']:.3f} (n={result['uzman_n']})",
+                    f"Resident: {result['resident_mean']:.3f}±{result['resident_std']:.3f} (n={result['resident_n']})",
+                    f"{result['p_value']:.4f}",
+                    "Anlamlı" if result['significant'] else "Anlamlı Değil",
+                    f"d={result['cohens_d']:.3f}\n({result['effect_size_interpretation']})"
+                ])
+
+        # Model karşılaştırmaları
+        if 'model_vs_human' in self.analyzer.results:
+            model_results = self.analyzer.results['model_vs_human']
+
+            if 'question_based' in model_results:
+                result = model_results['question_based']
+                table_data.append([
+                    result['test_name'],
+                    f"İnsan: {result['human_mean']:.3f}",
+                    f"Model: {result['model_mean']:.3f}",
+                    f"{result['p_value']:.4f}",
+                    "Anlamlı" if result['significant'] else "Anlamlı Değil",
+                    f"Δ={result['difference']:.3f}"
+                ])
+
+                f"Δ={result['difference']:.3f}\n({result['questions_analyzed']} soru)"
+            ])
+
+            # Korelasyon sonuçları
+            if 'correlations' in self.analyzer.results:
+                corr_results = self.analyzer.results['correlations']
+
+            if 'experience_performance' in corr_results:
+                result = corr_results['experience_performance']
+            table_data.append([
+            "Deneyim-Performans Korelasyonu",
+            "Pearson Correlation",
+            f"r={result['correlation']:.3f}",
+            f"{result['p_value']:.4f}",
+            "Anlamlı" if result['significant'] else "Anlamlı Değil",
+            result['interpretation']
+        ])
 
         if table_data:
-            columns = ['Karşılaştırma', 'Grup 1 Ort.', 'Grup 2 Ort.', 'p-değeri', 'Anlamlılık']
+            columns = ['Test', 'Grup 1', 'Grup 2', 'p-değeri', 'Anlamlılık', 'Etki Boyutu']
 
-            table = ax.table(cellText=table_data, colLabels=columns,
-                             cellLoc='center', loc='center')
-            table.auto_set_font_size(False)
-            table.set_fontsize(12)
-            table.scale(1, 2)
+        table = ax.table(cellText=table_data, colLabels=columns,
+                         cellLoc='center', loc='center', bbox=[0, 0, 1, 1])
+        table.auto_set_font_size(False)
+        table.set_fontsize(10)
+        table.scale(1, 2.5)
 
-            # Renklendirme
-            for i in range(len(columns)):
-                table[(0, i)].set_facecolor(CONFIG['colors']['neutral'])
-                table[(0, i)].set_text_props(weight='bold', color='white')
+        # Başlık renklendirme
+        for i in range(len(columns)):
+            table[(0, i)].set_facecolor(CONFIG['colors']['neutral'])
+        table[(0, i)].set_text_props(weight='bold', color='white')
 
-            for i in range(1, len(table_data) + 1):
-                for j in range(len(columns)):
-                    if j == 4:  # Anlamlılık sütunu
-                        color = CONFIG['colors']['success'] if 'Anlamlı' in table_data[i - 1][j] and 'Değil' not in \
-                                                               table_data[i - 1][j] else CONFIG['colors']['error']
-                        table[(i, j)].set_facecolor(color)
-                        table[(i, j)].set_text_props(weight='bold', color='white')
+        # Anlamlılık sütunu renklendirme
+        for i in range(1, len(table_data) + 1):
+            anlamli_col = 4  # Anlamlılık sütunu
+        if "Anlamlı" in table_data[i - 1][anlamli_col] and "Değil" not in table_data[i - 1][anlamli_col]:
+            color = CONFIG['colors']['success']
+        else:
+            color = CONFIG['colors']['error']
+        table[(i, anlamli_col)].set_facecolor(color)
+        table[(i, anlamli_col)].set_text_props(weight='bold', color='white')
 
         ax.axis('off')
-
         plt.tight_layout()
-        plt.savefig(self.output_dir / 'istatistiksel_ozet.png', dpi=300, bbox_inches='tight')
+
+        output_path = self.output_dir / 'istatistiksel_sonuclar_tablosu.png'
+        plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='white')
         plt.close()
 
-        print(f"✅ İstatistiksel özet tablosu kaydedildi: {self.output_dir / 'istatistiksel_ozet.png'}")
+        self.logger.info(f"✅ İstatistiksel sonuçlar tablosu kaydedildi: {output_path}")
+
+    def create_roc_analysis(self):
+        """ROC eğrisi analizi"""
+        self.logger.info("📈 ROC eğrisi analizi oluşturuluyor...")
+
+        if self.dp.merged_data is None:
+            self.logger.warning("⚠️ Birleştirilmiş veri bulunamadı")
+            return
+
+        # Sınıf bazlı ROC eğrileri
+        fig, axes = plt.subplots(2, 4, figsize=(20, 10))
+        fig.suptitle('Sınıf Bazlı ROC Eğrisi Karşılaştırması (Model vs İnsan)', fontsize=16, fontweight='bold')
+        axes = axes.flatten()
+
+        for idx, (class_code, class_name) in enumerate(CONFIG['classes'].items()):
+            if idx >= len(axes):
+                break
+
+            ax = axes[idx]
+            class_data = self.dp.merged_data[self.dp.merged_data['true_class'] == class_code]
+
+            if len(class_data) > 0:
+                # Model için ROC
+                y_true_model = (class_data['true_class'] == class_code).astype(int)
+                y_scores_model = class_data['model_correct'].astype(float)
+
+                # İnsan için ROC
+                human_scores = class_data.groupby('participant_id')['is_correct'].mean()
+
+                try:
+                    # Model ROC
+                    fpr_model, tpr_model, _ = roc_curve(y_true_model, y_scores_model)
+                    auc_model = roc_auc_score(y_true_model, y_scores_model)
+
+                    ax.plot(fpr_model, tpr_model, color=CONFIG['colors']['model'],
+                            linewidth=2, label=f'AI Model (AUC={auc_model:.3f})')
+
+                    # Diagonal line
+                    ax.plot([0, 1], [0, 1], 'k--', alpha=0.5)
+
+                    ax.set_xlabel('False Positive Rate')
+                    ax.set_ylabel('True Positive Rate')
+                    ax.set_title(f'{class_name}', fontweight='bold')
+                    ax.legend()
+                    ax.grid(True, alpha=0.3)
+
+                except Exception as e:
+                    ax.text(0.5, 0.5, f'ROC hesaplanamadı\n{str(e)[:50]}...',
+                            ha='center', va='center', transform=ax.transAxes)
+                    ax.set_title(f'{class_name}', fontweight='bold')
+            else:
+                ax.text(0.5, 0.5, 'Veri Yok', ha='center', va='center', transform=ax.transAxes)
+                ax.set_title(f'{class_name}', fontweight='bold')
+
+        plt.tight_layout()
+
+        output_path = self.output_dir / 'roc_egri_analizi.png'
+        plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='white')
+        plt.close()
+
+        self.logger.info(f"✅ ROC eğrisi analizi kaydedildi: {output_path}")
+
+    def create_time_analysis(self):
+        """Zaman analizi grafikleri"""
+        self.logger.info("⏱️ Zaman analizi grafikleri oluşturuluyor...")
+
+        if 'total_time_spent' not in self.dp.participant_data.columns:
+            self.logger.warning("⚠️ Zaman verisi bulunamadı")
+            return
+
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+        fig.suptitle('Zaman Performansı Analizi', fontsize=16, fontweight='bold')
+
+        # 1. Grup bazlı zaman dağılımı
+        ax1 = axes[0, 0]
+        time_by_group = []
+        group_labels = []
+
+        for group in self.dp.participant_data['group'].unique():
+            group_times = self.dp.participant_data[self.dp.participant_data['group'] == group]['total_time_spent']
+            if len(group_times) > 0:
+                time_by_group.append(group_times)
+                group_labels.append(group)
+
+        if time_by_group:
+            bp = ax1.boxplot(time_by_group, labels=group_labels, patch_artist=True)
+
+            for patch, group in zip(bp['boxes'], group_labels):
+                color = (CONFIG['colors']['uzman'] if 'Uzman' in group else
+                         CONFIG['colors']['resident'] if 'Resident' in group else
+                         CONFIG['colors']['neutral'])
+                patch.set_facecolor(color)
+                patch.set_alpha(0.7)
+
+            ax1.set_ylabel('Toplam Süre (dakika)')
+            ax1.set_title('Grup Bazlı Tamamlama Süresi', fontweight='bold')
+            ax1.grid(True, alpha=0.3)
+
+        # 2. Başarı-zaman ilişkisi
+        ax2 = axes[0, 1]
+        ax2.scatter(self.dp.participant_data['total_time_spent'],
+                    self.dp.participant_data['success_rate'],
+                    alpha=0.6, color=CONFIG['colors']['neutral'])
+
+        # Trend line
+        z = np.polyfit(self.dp.participant_data['total_time_spent'],
+                       self.dp.participant_data['success_rate'], 1)
+        p = np.poly1d(z)
+        ax2.plot(self.dp.participant_data['total_time_spent'],
+                 p(self.dp.participant_data['total_time_spent']),
+                 "r--", alpha=0.8, linewidth=2)
+
+        ax2.set_xlabel('Toplam Süre (dakika)')
+        ax2.set_ylabel('Başarı Oranı')
+        ax2.set_title('Süre vs Başarı İlişkisi', fontweight='bold')
+        ax2.grid(True, alpha=0.3)
+
+        # 3. Ortalama cevap süresi analizi
+        ax3 = axes[1, 0]
+        if 'average_answer_time' in self.dp.participant_data.columns:
+            ax3.hist(self.dp.participant_data['average_answer_time'],
+                     bins=20, color=CONFIG['colors']['neutral'], alpha=0.7, edgecolor='black')
+            ax3.axvline(self.dp.participant_data['average_answer_time'].mean(),
+                        color=CONFIG['colors']['error'], linestyle='--', linewidth=2,
+                        label=f'Ortalama: {self.dp.participant_data["average_answer_time"].mean():.2f}s')
+            ax3.set_xlabel('Ortalama Cevap Süresi (saniye)')
+            ax3.set_ylabel('Katılımcı Sayısı')
+            ax3.set_title('Ortalama Cevap Süresi Dağılımı', fontweight='bold')
+            ax3.legend()
+            ax3.grid(True, alpha=0.3)
+
+        # 4. Deneyim-zaman ilişkisi
+        ax4 = axes[1, 1]
+        exp_groups = self.dp.participant_data.groupby('experience')['total_time_spent'].mean().sort_values()
+
+        bars = ax4.bar(range(len(exp_groups)), exp_groups.values,
+                       color=CONFIG['colors']['success'], alpha=0.7)
+        ax4.set_xticks(range(len(exp_groups)))
+        ax4.set_xticklabels(exp_groups.index, rotation=45, ha='right')
+        ax4.set_ylabel('Ortalama Süre (dakika)')
+        ax4.set_title('Deneyim Seviyesi vs Ortalama Süre', fontweight='bold')
+        ax4.grid(True, alpha=0.3, axis='y')
+
+        plt.tight_layout()
+
+        output_path = self.output_dir / 'zaman_performans_analizi.png'
+        plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='white')
+        plt.close()
+
+        self.logger.info(f"✅ Zaman analizi grafikleri kaydedildi: {output_path}")
+
+    def _calculate_confusion_matrix_for_model(self):
+        """Model için confusion matrix hesapla"""
+        try:
+            if self.dp.merged_data is None:
+                return None
+
+            # Basitleştirilmiş binary confusion matrix (doğru/yanlış)
+            class_accuracy = self.dp.merged_data.groupby('true_class')['model_correct'].sum()
+            class_totals = self.dp.merged_data['true_class'].value_counts()
+
+            # Sınıf bazlı doğru/yanlış matrisi
+            confusion_data = []
+            for class_code in CONFIG['classes'].keys():
+                if class_code in class_accuracy.index:
+                    correct = class_accuracy[class_code]
+                    total = class_totals[class_code]
+                    wrong = total - correct
+                    confusion_data.append([correct, wrong])
+                else:
+                    confusion_data.append([0, 0])
+
+            return np.array(confusion_data)
+
+        except Exception as e:
+            self.logger.warning(f"Model confusion matrix hesaplanamadı: {e}")
+            return None
+
+    def _calculate_confusion_matrix_for_group(self, group_name):
+        """Belirtilen grup için confusion matrix hesapla"""
+        try:
+            if self.dp.merged_data is None:
+                return None
+
+            group_data = self.dp.merged_data[self.dp.merged_data['group'] == group_name]
+
+            if len(group_data) == 0:
+                return None
+
+            class_accuracy = group_data.groupby('true_class')['is_correct'].sum()
+            class_totals = group_data['true_class'].value_counts()
+
+            # Sınıf bazlı doğru/yanlış matrisi
+            confusion_data = []
+            for class_code in CONFIG['classes'].keys():
+                if class_code in class_accuracy.index:
+                    correct = class_accuracy[class_code]
+                    total = class_totals[class_code]
+                    wrong = total - correct
+                    confusion_data.append([correct, wrong])
+                else:
+                    confusion_data.append([0, 0])
+
+            return np.array(confusion_data)
+
+        except Exception as e:
+            self.logger.warning(f"{group_name} grubu confusion matrix hesaplanamadı: {e}")
+            return None
 
 
 # =============================================================================
-# REPORT GENERATOR
+# REPORT GENERATOR CLASS
 # =============================================================================
-class ReportGenerator:
+
+class DermatologyReportGenerator:
     """Rapor oluşturucu sınıfı"""
 
-    def __init__(self, data_processor, analyzer):
+    def __init__(self, data_processor, analyzer, visualizer):
         self.dp = data_processor
         self.analyzer = analyzer
+        self.visualizer = visualizer
+        self.logger = logging.getLogger(__name__)
         self.output_dir = Path(CONFIG['paths']['output_dir'])
 
-    def generate_comprehensive_report(self):
-        """Kapsamlı rapor oluştur"""
-        print("📋 Kapsamlı rapor oluşturuluyor...")
+    def generate_json_report(self):
+        """JSON formatında kapsamlı rapor oluştur"""
+        self.logger.info("📄 JSON raporu oluşturuluyor...")
 
-        report_path = self.output_dir / 'dermatoloji_tezi_analiz_raporu.txt'
-
-        with open(report_path, 'w', encoding='utf-8') as f:
-            f.write("=" * 80 + "\n")
-            f.write("DERMATOLOJİ UZMANLIK TEZİ - KAPSAMLI VERİ ANALİZİ RAPORU\n")
-            f.write("=" * 80 + "\n")
-            f.write(f"Rapor Tarihi: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}\n")
-            f.write(f"Analist: arcankc\n")
-            f.write("=" * 80 + "\n\n")
-
-            # Veri özeti
-            f.write("1. VERİ ÖZETİ\n")
-            f.write("-" * 30 + "\n")
-
-            if self.dp.model_data is not None:
-                f.write(f"Model Test Verileri: {len(self.dp.model_data)} soru\n")
-                f.write(f"Model Başarı Oranı: {self.dp.model_data['model_correct'].mean():.3f}\n")
-
-            if self.dp.participant_data is not None:
-                f.write(f"Katılımcı Sayısı: {self.dp.participant_data['participant_id'].nunique()}\n")
-                f.write(f"Toplam Cevap: {len(self.dp.participant_data)}\n")
-                f.write(f"Ortalama İnsan Başarı Oranı: {self.dp.participant_data['is_correct'].mean():.3f}\n")
-
-            if 'group' in self.dp.participant_data.columns:
-                group_counts = self.dp.participant_data['group'].value_counts()
-                f.write(f"\nKatılımcı Dağılımı:\n")
-                for group, count in group_counts.items():
-                    f.write(f"  {group}: {count} katılımcı\n")
-
-            # Genel performans
-            f.write("\n2. GENEL PERFORMANS ANALİZİ\n")
-            f.write("-" * 35 + "\n")
-
-            if 'overall' in self.analyzer.results:
-                overall = self.analyzer.results['overall']
-
-                if 'model' in overall:
-                    f.write(f"Model Performansı:\n")
-                    f.write(
-                        f"  Doğru Cevap: {overall['model']['correct_answers']}/{overall['model']['total_questions']}\n")
-                    f.write(f"  Başarı Oranı: {overall['model']['accuracy']:.3f}\n\n")
-
-                if 'participants' in overall:
-                    f.write(f"Katılımcı Performansı:\n")
-                    f.write(f"  Ortalama Başarı: {overall['participants']['average_accuracy']:.3f}\n")
-                    f.write(f"  Standart Sapma: {overall['participants']['std_accuracy']:.3f}\n")
-                    f.write(f"  En Düşük: {overall['participants']['min_accuracy']:.3f}\n")
-                    f.write(f"  En Yüksek: {overall['participants']['max_accuracy']:.3f}\n\n")
-
-            # İstatistiksel testler
-            f.write("3. İSTATİSTİKSEL TEST SONUÇLARI\n")
-            f.write("-" * 35 + "\n")
-
-            if 'statistical_tests' in self.analyzer.results:
-                tests = self.analyzer.results['statistical_tests']
-
-                for test_name, results in tests.items():
-                    if test_name == 'uzman_vs_asistan':
-                        f.write(f"Uzman vs Asistan Karşılaştırması:\n")
-                        f.write(f"  Test: {results['test']}\n")
-                        f.write(f"  Uzman Ortalama: {results['uzman_mean']:.3f}\n")
-                        f.write(f"  Asistan Ortalama: {results['asistan_mean']:.3f}\n")
-                        f.write(f"  p-değeri: {results['p_value']:.3f}\n")
-                        f.write(f"  Anlamlılık: {'Anlamlı' if results['significant'] else 'Anlamlı Değil'}\n\n")
-
-                    elif test_name == 'model_vs_human':
-                        f.write(f"Model vs İnsan Karşılaştırması:\n")
-                        f.write(f"  Test: {results['test']}\n")
-                        f.write(f"  Model Ortalama: {results['model_mean']:.3f}\n")
-                        f.write(f"  İnsan Ortalama: {results['human_mean']:.3f}\n")
-                        f.write(f"  p-değeri: {results['p_value']:.3f}\n")
-                        f.write(f"  Anlamlılık: {'Anlamlı' if results['significant'] else 'Anlamlı Değil'}\n\n")
-
-            # Sınıf bazlı analiz
-            f.write("4. SINIF BAZLI PERFORMANS\n")
-            f.write("-" * 30 + "\n")
-
-            if 'class_wise' in self.analyzer.results:
-                if self.dp.merged_data is not None:
-                    class_performance = self.dp.merged_data.groupby('true_class').agg({
-                        'is_correct': ['count', 'mean'],
-                        'model_correct': 'mean'
-                    })
-
-                    f.write("Hastalık Sınıfı Bazlı Başarı Oranları:\n")
-                    f.write(f"{'Sınıf':<20} {'Soru Sayısı':<12} {'İnsan':<8} {'Model':<8}\n")
-                    f.write("-" * 50 + "\n")
-
-                    for class_code in class_performance.index:
-                        class_name = CONFIG['classes'].get(class_code, class_code)
-                        count = class_performance.loc[class_code, ('is_correct', 'count')]
-                        human_acc = class_performance.loc[class_code, ('is_correct', 'mean')]
-                        model_acc = class_performance.loc[class_code, 'model_correct']
-
-                        f.write(f"{class_name[:19]:<20} {count:<12} {human_acc:.3f}    {model_acc:.3f}\n")
-
-            # Deneyim analizi
-            f.write("\n5. DENEYİM ANALİZİ\n")
-            f.write("-" * 20 + "\n")
-
-            if 'experience' in self.analyzer.results:
-                exp_results = self.analyzer.results['experience']
-
-                if 'experience_correlation' in exp_results:
-                    corr = exp_results['experience_correlation']
-                    f.write(f"Deneyim Yılı - Başarı Korelasyonu:\n")
-                    f.write(f"  Korelasyon Katsayısı: {corr['correlation']:.3f}\n")
-                    f.write(f"  p-değeri: {corr['p_value']:.3f}\n")
-                    f.write(f"  Anlamlılık: {'Anlamlı' if corr['significant'] else 'Anlamlı Değil'}\n\n")
-
-                if 'group_comparison' in exp_results:
-                    group_comp = exp_results['group_comparison']
-                    f.write(f"Deneyim Grupları Karşılaştırması:\n")
-                    f.write(f"  Test: {group_comp['test']}\n")
-                    f.write(f"  p-değeri: {group_comp['p_value']:.3f}\n")
-                    f.write(f"  Anlamlılık: {'Anlamlı' if group_comp['significant'] else 'Anlamlı Değil'}\n\n")
-
-            # Sonuçlar ve öneriler
-            f.write("6. SONUÇLAR VE ÖNERİLER\n")
-            f.write("-" * 25 + "\n")
-
-            f.write("Ana Bulgular:\n")
-
-            # Model vs İnsan karşılaştırması
-            if self.dp.model_data is not None and self.dp.participant_data is not None:
-                model_acc = self.dp.model_data['model_correct'].mean()
-                human_acc = self.dp.participant_data['is_correct'].mean()
-
-                if model_acc > human_acc:
-                    f.write(f"• Model ({model_acc:.3f}) insanlardan ({human_acc:.3f}) daha başarılı\n")
-                else:
-                    f.write(f"• İnsanlar ({human_acc:.3f}) modelden ({model_acc:.3f}) daha başarılı\n")
-
-            # Uzman vs Asistan
-            if 'group' in self.dp.participant_data.columns:
-                group_stats = self.dp.participant_data.groupby('group')['is_correct'].mean()
-                if 'Uzman' in group_stats.index and 'Asistan' in group_stats.index:
-                    uzman_acc = group_stats['Uzman']
-                    asistan_acc = group_stats['Asistan']
-
-                    if uzman_acc > asistan_acc:
-                        f.write(f"• Uzmanlar ({uzman_acc:.3f}) asistanlardan ({asistan_acc:.3f}) daha başarılı\n")
-                    else:
-                        f.write(f"• Asistanlar ({asistan_acc:.3f}) uzmanlardan ({uzman_acc:.3f}) daha başarılı\n")
-
-            f.write("\nÖneriler:\n")
-            f.write("• Model performansının yüksek olduğu alanlarda klinik karar desteği kullanılabilir\n")
-            f.write("• Düşük performans gösteren hastalık sınıfları için ek eğitim programları düzenlenebilir\n")
-            f.write("• Deneyim süresi ile başarı oranı arasındaki ilişki göz önünde bulundurularak\n")
-            f.write("  mezuniyet sonrası eğitim programları optimize edilebilir\n")
-
-            f.write("\n" + "=" * 80 + "\n")
-            f.write("Rapor Sonu\n")
-            f.write("GitHub: https://github.com/arcankc\n")
-            f.write("=" * 80 + "\n")
-
-        print(f"✅ Kapsamlı rapor oluşturuldu: {report_path}")
-
-        # JSON formatında da kaydet
-        self._save_json_results()
-
-    def _save_json_results(self):
-        """Sonuçları JSON formatında kaydet"""
-        json_path = self.output_dir / 'analiz_sonuclari.json'
-
-        results_dict = {
-            'timestamp': datetime.now().isoformat(),
-            'data_summary': {
-                'model_questions': len(self.dp.model_data) if self.dp.model_data is not None else 0,
-                'participants': self.dp.participant_data[
-                    'participant_id'].nunique() if self.dp.participant_data is not None else 0,
-                'total_responses': len(self.dp.participant_data) if self.dp.participant_data is not None else 0
+        report = {
+            'metadata': {
+                'analysis_date': datetime.now().isoformat(),
+                'analysis_type': 'Dermatoloji Uzmanlık Tezi Analizi',
+                'version': '1.0.0',
+                'researcher': 'arcankc',
+                'significance_level': CONFIG['analysis']['significance_level']
             },
-            'analysis_results': self.analyzer.results,
-            'config': CONFIG
+            'data_summary': {
+                'total_participants': len(self.dp.participant_data) if self.dp.participant_data is not None else 0,
+                'total_questions': 80,  # Quiz'de 80 soru
+                'model_accuracy': self.dp.model_quiz_data[
+                    'model_correct'].mean() if self.dp.model_quiz_data is not None else None,
+                'classes_analyzed': list(CONFIG['classes'].keys())
+            },
+            'statistical_results': self.analyzer.results,
+            'data_cleaning_log': {
+                'rows_skipped': CONFIG['data_cleaning']['skip_first_n_rows'],
+                'exclusion_criteria': CONFIG['data_cleaning']['exclude_conditions'],
+                'duplicate_strategy': CONFIG['data_cleaning']['duplicate_strategy']
+            }
         }
 
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(results_dict, f, indent=2, ensure_ascii=False, default=str)
+        # Ek hesaplanan metrikler
+        if self.dp.merged_data is not None:
+            # Sınıf bazlı performans özeti
+            class_summary = {}
+            for class_code, class_name in CONFIG['classes'].items():
+                class_data = self.dp.merged_data[self.dp.merged_data['true_class'] == class_code]
 
-        print(f"✅ JSON sonuçları kaydedildi: {json_path}")
+                if len(class_data) > 0:
+                    class_summary[class_code] = {
+                        'name_tr': class_name,
+                        'total_samples': len(class_data),
+                        'model_accuracy': class_data['model_correct'].mean(),
+                        'human_accuracy': class_data['is_correct'].mean(),
+                        'uzman_accuracy': class_data[class_data['group'] == 'Uzman']['is_correct'].mean()
+                        if len(class_data[class_data['group'] == 'Uzman']) > 0 else 0,
+                        'resident_accuracy': class_data[class_data['group'] == 'Resident']['is_correct'].mean()
+                        if len(class_data[class_data['group'] == 'Resident']) > 0 else 0
+                    }
+
+            report['class_performance_summary'] = class_summary
+
+        # JSON dosyasını kaydet
+        output_path = self.output_dir / 'kapsamli_analiz_raporu.json'
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(report, f, ensure_ascii=False, indent=2, default=str)
+
+        self.logger.info(f"✅ JSON raporu kaydedildi: {output_path}")
+
+        return report
+
+    def generate_excel_report(self):
+        """Excel formatında analiz tabloları oluştur"""
+        self.logger.info("📊 Excel raporu oluşturuluyor...")
+
+        output_path = self.output_dir / 'dermatoloji_tezi_analiz_sonuclari.xlsx'
+
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            # 1. Tanımlayıcı İstatistikler
+            if 'descriptive' in self.analyzer.results:
+                desc_data = []
+
+                # Katılımcı özeti
+                if self.dp.participant_data is not None:
+                    participant_summary = self.dp.participant_data.groupby('group').agg({
+                        'participant_id': 'count',
+                        'success_rate': ['mean', 'std', 'min', 'max']
+                    }).round(4)
+                    participant_summary.to_excel(writer, sheet_name='Katılımcı_Özeti')
+
+                # Model performansı
+                if self.dp.model_quiz_data is not None:
+                    model_perf = self.dp.model_quiz_data.groupby('true_class')['model_correct'].agg([
+                        'mean', 'count', 'sum'
+                    ]).round(4)
+                    model_perf.to_excel(writer, sheet_name='Model_Performansı')
+
+            # 2. İstatistiksel Test Sonuçları
+            if 'group_comparisons' in self.analyzer.results:
+                test_results = []
+
+                if 'uzman_vs_resident' in self.analyzer.results['group_comparisons']:
+                    result = self.analyzer.results['group_comparisons']['uzman_vs_resident']
+                    test_results.append({
+                        'Test': result['test_name'],
+                        'Uzman_Ortalama': result['uzman_mean'],
+                        'Resident_Ortalama': result['resident_mean'],
+                        'p_değeri': result['p_value'],
+                        'Anlamlı': result['significant'],
+                        'Cohens_d': result['cohens_d'],
+                        'Etki_Boyutu': result['effect_size_interpretation']
+                    })
+
+                if test_results:
+                    test_df = pd.DataFrame(test_results)
+                    test_df.to_excel(writer, sheet_name='İstatistiksel_Testler', index=False)
+
+            # 3. Sınıf Bazlı Performans
+            if self.dp.merged_data is not None:
+                class_performance = []
+
+                for class_code, class_name in CONFIG['classes'].items():
+                    class_data = self.dp.merged_data[self.dp.merged_data['true_class'] == class_code]
+
+                    if len(class_data) > 0:
+                        uzman_data = class_data[class_data['group'] == 'Uzman']
+                        resident_data = class_data[class_data['group'] == 'Resident']
+
+                        class_performance.append({
+                            'Sınıf_Kodu': class_code,
+                            'Sınıf_Adı': class_name,
+                            'Toplam_Soru': len(class_data),
+                            'Model_Başarı': class_data['model_correct'].mean(),
+                            'Uzman_Başarı': uzman_data['is_correct'].mean() if len(uzman_data) > 0 else 0,
+                            'Resident_Başarı': resident_data['is_correct'].mean() if len(resident_data) > 0 else 0,
+                            'Uzman_Sayısı': len(uzman_data),
+                            'Resident_Sayısı': len(resident_data)
+                        })
+
+                if class_performance:
+                    class_df = pd.DataFrame(class_performance)
+                    class_df.to_excel(writer, sheet_name='Sınıf_Bazlı_Performans', index=False)
+
+            # 4. Model vs İnsan Karşılaştırması
+            if 'model_vs_human' in self.analyzer.results:
+                comparison_data = []
+
+                if 'overall' in self.analyzer.results['model_vs_human']:
+                    overall = self.analyzer.results['model_vs_human']['overall']
+                    comparison_data.append({
+                        'Karşılaştırma': 'Genel',
+                        'İnsan_Başarı': overall['human_accuracy'],
+                        'Model_Başarı': overall['model_accuracy'],
+                        'Fark': overall['difference'],
+                        'İyileştirme_Yüzdesi': overall['improvement_percentage']
+                    })
+
+                if comparison_data:
+                    comp_df = pd.DataFrame(comparison_data)
+                    comp_df.to_excel(writer, sheet_name='Model_İnsan_Karşılaştırma', index=False)
+
+        self.logger.info(f"✅ Excel raporu kaydedildi: {output_path}")
+
+    def generate_markdown_report(self):
+        """Markdown formatında tez raporu oluştur"""
+        self.logger.info("📝 Markdown raporu oluşturuluyor...")
+
+        report_content = f"""
+        # Dermatoloji Uzmanlık Tezi - Veri Analizi Raporu
+
+        **Tarih:** {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}  
+        **Araştırmacı:** arcankc  
+        **Analiz Tipi:** Yapay Zeka vs İnsan Uzman Performans Karşılaştırması  
+        **Anlamlılık Düzeyi:** p < {CONFIG['analysis']['significance_level']}
+
+        ## 📋 Analiz Özeti
+
+        ### Veri Seti Bilgileri
+        - **Toplam Katılımcı:** {len(self.dp.participant_data) if self.dp.participant_data is not None else 'N/A'}
+        - **Toplam Soru Sayısı:** 80
+        - **Analiz Edilen Sınıf Sayısı:** {len(CONFIG['classes'])}
+        - **Model Genel Başarı:** {self.dp.model_quiz_data['model_correct'].mean():.3f} ({self.dp.model_quiz_data['model_correct'].mean() * 100:.1f}%) 
+          (Model verileri mevcut ise)
+
+        ### Veri Temizleme İşlemleri
+        - İlk {CONFIG['data_cleaning']['skip_first_n_rows']} satır analiz dışı bırakıldı
+        - Aynı katılımcıdan birden fazla denemede en yüksek skor tutuldu
+        - Deneyim kriteri: position="resident" ve experience="<1" olan veriler çıkarıldı
+
+        ## 📊 Ana Bulgular
+
+        ### Grup Karşılaştırması
+        """
+
+        # Grup karşılaştırma sonuçlarını ekle
+        if 'group_comparisons' in self.analyzer.results:
+            if 'uzman_vs_resident' in self.analyzer.results['group_comparisons']:
+                result = self.analyzer.results['group_comparisons']['uzman_vs_resident']
+
+                report_content += f"""
+        **Uzman vs Resident Karşılaştırması:**
+        - **Test:** {result['test_name']}
+        - **Uzman Başarı Oranı:** {result['uzman_mean']:.3f} ± {result['uzman_std']:.3f} (n={result['uzman_n']})
+        - **Resident Başarı Oranı:** {result['resident_mean']:.3f} ± {result['resident_std']:.3f} (n={result['resident_n']})
+        - **p-değeri:** {result['p_value']:.4f}
+        - **İstatistiksel Anlamlılık:** {'Anlamlı' if result['significant'] else 'Anlamlı Değil'}
+        - **Etki Boyutu (Cohen's d):** {result['cohens_d']:.3f} ({result['effect_size_interpretation']})
+        """
+
+        # Model vs İnsan karşılaştırması
+        if 'model_vs_human' in self.analyzer.results:
+            if 'overall' in self.analyzer.results['model_vs_human']:
+                overall = self.analyzer.results['model_vs_human']['overall']
+
+                report_content += f"""
+        ### Model vs İnsan Performansı
+        - **İnsan Genel Başarısı:** {overall['human_accuracy']:.3f} ({overall['human_accuracy'] * 100:.1f}%)
+        - **Model Genel Başarısı:** {overall['model_accuracy']:.3f} ({overall['model_accuracy'] * 100:.1f}%)
+        - **Performans Farkı:** {overall['difference']:.3f}
+        - **İyileştirme Oranı:** {overall['improvement_percentage']:.1f}%
+        """
+
+        # Sınıf bazlı performans
+        report_content += """
+        ### Sınıf Bazlı Performans
+
+        | Hastalık Sınıfı | Model Başarısı | Uzman Başarısı | Resident Başarısı |
+        |------------------|----------------|----------------|-------------------|
+        """
+
+        if self.dp.merged_data is not None:
+            for class_code, class_name in CONFIG['classes'].items():
+                class_data = self.dp.merged_data[self.dp.merged_data['true_class'] == class_code]
+
+                if len(class_data) > 0:
+                    model_acc = class_data['model_correct'].mean()
+                    uzman_data = class_data[class_data['group'] == 'Uzman']
+                    resident_data = class_data[class_data['group'] == 'Resident']
+
+                    uzman_acc = uzman_data['is_correct'].mean() if len(uzman_data) > 0 else 0
+                    resident_acc = resident_data['is_correct'].mean() if len(resident_data) > 0 else 0
+
+                    report_content += f"| {class_name} | {model_acc:.3f} | {uzman_acc:.3f} | {resident_acc:.3f} |\n"
+
+        report_content += """
+        ## 🎯 Sonuç ve Öneriler
+
+        ### Ana Bulgular Özeti
+        1. **Uzman vs Resident Performansı:** [Bulgulara göre yorumlanacak]
+        2. **AI Model Performansı:** [Bulgulara göre yorumlanacak]
+        3. **Sınıf Bazlı Zorluklar:** [En zor/kolay sınıflar belirtilecek]
+
+        ### Klinik Öneriler
+        1. **Eğitim Programları:** Resident eğitiminde AI destekli sistemlerin kullanımı
+        2. **Tanı Desteği:** Belirli hastalık sınıflarında AI desteğinin önemi
+        3. **Kalite Kontrol:** Tanı doğruluğunu artırmak için öneriler
+
+        ### Araştırma Sınırlılıkları
+        1. Örneklem büyüklüğü dengesizliği (Resident > Uzman)
+        2. Quiz formatının klinik pratiği tam yansıtmaması
+        3. AI model sınırlamaları
+
+        ### Gelecek Çalışmalar
+        1. Daha geniş örneklem ile tekrar
+        2. Gerçek klinik vaka analizleri
+        3. Longitudinal performans takibi
+
+        ---
+
+        **Rapor Oluşturma Tarihi:** {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}  
+        **GitHub:** https://github.com/arcankc/Statistics
+        """
+
+        # Markdown dosyasını kaydet
+        output_path = self.output_dir / 'dermatoloji_tez_raporu.md'
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(report_content)
+
+        self.logger.info(f"✅ Markdown raporu kaydedildi: {output_path}")
+
+    def create_thesis_tables(self):
+        """Tez için hazır LaTeX tabloları oluştur"""
+        self.logger.info("📋 Tez tabloları oluşturuluyor...")
+
+        # Tez için hazır tablolar
+        output_path = self.output_dir / 'tez_tablolari.txt'
+
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write("DERMATOLOJI TEZİ - HAZIR TABLOLAR\n")
+            f.write("=" * 50 + "\n\n")
+
+            # Tablo 1: Katılımcı Demografikleri
+            f.write("TABLO 1: Katılımcı Demografik Özellikleri\n")
+            f.write("-" * 40 + "\n")
+
+            if self.dp.participant_data is not None:
+                group_summary = self.dp.participant_data.groupby('group').agg({
+                    'participant_id': 'count',
+                    'success_rate': ['mean', 'std']
+                }).round(3)
+
+                f.write(str(group_summary))
+                f.write("\n\n")
+
+            # Tablo 2: İstatistiksel Test Sonuçları
+            f.write("TABLO 2: İstatistiksel Test Sonuçları\n")
+            f.write("-" * 40 + "\n")
+
+            if 'group_comparisons' in self.analyzer.results:
+                if 'uzman_vs_resident' in self.analyzer.results['group_comparisons']:
+                    result = self.analyzer.results['group_comparisons']['uzman_vs_resident']
+
+                    f.write(f"Test: {result['test_name']}\n")
+                    f.write(f"Uzman: {result['uzman_mean']:.3f} ± {result['uzman_std']:.3f}\n")
+                    f.write(f"Resident: {result['resident_mean']:.3f} ± {result['resident_std']:.3f}\n")
+                    f.write(f"p-değeri: {result['p_value']:.4f}\n")
+                    f.write(f"Cohen's d: {result['cohens_d']:.3f}\n")
+                    f.write("\n")
+
+            # Tablo 3: Sınıf Bazlı Performans
+            f.write("TABLO 3: Hastalık Sınıfı Bazlı Performans Karşılaştırması\n")
+            f.write("-" * 60 + "\n")
+            f.write("Sınıf\t\tModel\tUzman\tResident\tToplam Soru\n")
+            f.write("-" * 60 + "\n")
+
+            if self.dp.merged_data is not None:
+                for class_code, class_name in CONFIG['classes'].items():
+                    class_data = self.dp.merged_data[self.dp.merged_data['true_class'] == class_code]
+
+                    if len(class_data) > 0:
+                        model_acc = class_data['model_correct'].mean()
+                        uzman_data = class_data[class_data['group'] == 'Uzman']
+                        resident_data = class_data[class_data['group'] == 'Resident']
+
+                        uzman_acc = uzman_data['is_correct'].mean() if len(uzman_data) > 0 else 0
+                        resident_acc = resident_data['is_correct'].mean() if len(resident_data) > 0 else 0
+
+                        f.write(
+                            f"{class_name[:15]:<15}\t{model_acc:.3f}\t{uzman_acc:.3f}\t{resident_acc:.3f}\t{len(class_data)}\n")
+
+        self.logger.info(f"✅ Tez tabloları kaydedildi: {output_path}")
 
 
 # =============================================================================
-# MAIN ANALYSIS PIPELINE
+# UTILITY FUNCTIONS
 # =============================================================================
+
+def bootstrap_analysis(data1, data2, n_bootstrap=1000, confidence_level=0.95):
+    """Bootstrap analizi ile güven aralıkları hesapla"""
+    np.random.seed(CONFIG['analysis']['random_state'])
+
+    bootstrap_diffs = []
+
+    for _ in range(n_bootstrap):
+        # Resample with replacement
+        sample1 = np.random.choice(data1, len(data1), replace=True)
+        sample2 = np.random.choice(data2, len(data2), replace=True)
+
+        # Calculate difference in means
+        diff = np.mean(sample1) - np.mean(sample2)
+        bootstrap_diffs.append(diff)
+
+    bootstrap_diffs = np.array(bootstrap_diffs)
+
+    # Calculate confidence interval
+    alpha = 1 - confidence_level
+    lower = np.percentile(bootstrap_diffs, (alpha / 2) * 100)
+    upper = np.percentile(bootstrap_diffs, (1 - alpha / 2) * 100)
+
+    return {
+        'mean_difference': np.mean(bootstrap_diffs),
+        'confidence_interval': (lower, upper),
+        'confidence_level': confidence_level,
+        'bootstrap_samples': n_bootstrap
+    }
+
+
+def calculate_power_analysis(effect_size, n1, n2, alpha=0.05):
+    """İstatistiksel güç analizi hesapla"""
+    try:
+        from scipy.stats import norm
+
+        # Cohen's d için güç analizi
+        pooled_n = (n1 * n2) / (n1 + n2)
+        ncp = effect_size * np.sqrt(pooled_n / 2)  # Non-centrality parameter
+
+        # Critical value for two-tailed test
+        critical_value = norm.ppf(1 - alpha / 2)
+
+        # Power calculation
+        power = 1 - norm.cdf(critical_value - ncp) + norm.cdf(-critical_value - ncp)
+
+        return {
+            'power': power,
+            'effect_size': effect_size,
+            'sample_size_1': n1,
+            'sample_size_2': n2,
+            'alpha': alpha
+        }
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Güç analizi hesaplanamadı: {e}")
+        return None
+
+
+def apply_multiple_comparison_correction(p_values, method='bonferroni'):
+    """Çoklu karşılaştırma düzeltmesi uygula"""
+    if method == 'bonferroni':
+        adjusted_alpha = CONFIG['analysis']['significance_level'] / len(p_values)
+        adjusted_p_values = [p * len(p_values) for p in p_values]
+    elif method == 'fdr':
+        # False Discovery Rate (Benjamini-Hochberg)
+        sorted_p = np.sort(p_values)
+        sorted_indices = np.argsort(p_values)
+        m = len(p_values)
+
+        adjusted_p_values = []
+        for i, p in enumerate(sorted_p):
+            adjusted_p = p * m / (i + 1)
+            adjusted_p_values.append(min(adjusted_p, 1.0))
+
+        # Restore original order
+        final_adjusted = [0] * len(p_values)
+        for i, idx in enumerate(sorted_indices):
+            final_adjusted[idx] = adjusted_p_values[i]
+
+        adjusted_p_values = final_adjusted
+        adjusted_alpha = CONFIG['analysis']['significance_level']
+
+    return {
+        'method': method,
+        'original_p_values': p_values,
+        'adjusted_p_values': adjusted_p_values,
+        'adjusted_alpha': adjusted_alpha,
+        'significant_after_correction': [p < adjusted_alpha for p in adjusted_p_values]
+    }
+
+
+# =============================================================================
+# MAIN FUNCTION
+# =============================================================================
+
 def main():
-    """Ana analiz pipeline'ı"""
-    print("🚀 Dermatoloji Tezi - Kapsamlı Veri Analizi Başlatılıyor")
-    print("=" * 60)
-    print(f"👤 Kullanıcı: arcankc")
-    print(f"📅 Tarih: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
-    print(f"🎯 Hedef: Model vs İnsan Performans Karşılaştırması")
-    print("=" * 60)
+    """Ana analiz fonksiyonu"""
+    logger = setup_logging()
 
     try:
-        # 1. Veri İşleme
-        print("\n📂 1. VERİ İŞLEME AŞAMASI")
-        print("-" * 30)
+        logger.info("🚀 Dermatoloji tez analizi başlatılıyor...")
 
-        data_processor = DataProcessor()
+        # 1. Veri İşleme
+        logger.info("📊 1. VERİ İŞLEME AŞAMASI")
+        logger.info("-" * 30)
+
+        data_processor = DermatologyDataProcessor()
 
         if not data_processor.load_data():
+            logger.error("❌ Veri yüklenemedi!")
             return False
 
-        data_processor.preprocess_model_data()
-        data_processor.preprocess_participant_data()
-        data_processor.merge_data()
+        if not data_processor.clean_participant_data():
+            logger.error("❌ Veri temizlenemedi!")
+            return False
+
+        if not data_processor.prepare_model_data():
+            logger.error("❌ Model verileri hazırlanamadı!")
+            return False
+
+        if not data_processor.merge_data():
+            logger.error("❌ Veriler birleştirilemedi!")
+            return False
 
         # 2. İstatistiksel Analiz
-        print("\n📊 2. İSTATİSTİKSEL ANALİZ AŞAMASI")
-        print("-" * 35)
+        logger.info("\n📊 2. İSTATİSTİKSEL ANALİZ AŞAMASI")
+        logger.info("-" * 35)
 
-        analyzer = StatisticalAnalyzer(data_processor)
+        analyzer = DermatologyStatAnalyzer(data_processor)
 
-        analyzer.analyze_overall_performance()
-        analyzer.analyze_class_wise_performance()
-        analyzer.statistical_tests()
-        analyzer.experience_analysis()
+        analyzer.descriptive_statistics()
+        analyzer.group_comparisons()
+        analyzer.model_vs_human_analysis()
+        analyzer.correlation_analysis()
+        analyzer.advanced_statistical_tests()
 
         # 3. Görselleştirme
-        print("\n🎨 3. GÖRSELLEŞTİRME AŞAMASI")
-        print("-" * 30)
+        logger.info("\n🎨 3. GÖRSELLEŞTİRME AŞAMASI")
+        logger.info("-" * 30)
 
-        visualizer = Visualizer(data_processor, analyzer)
+        visualizer = DermatologyVisualizer(data_processor, analyzer)
 
-        visualizer.create_overall_comparison()
-        visualizer.create_class_wise_analysis()
+        visualizer.create_main_comparison_chart()
+        visualizer.create_participant_distribution_charts()
+        visualizer.create_performance_boxplots()
         visualizer.create_confusion_matrices()
-        visualizer.create_experience_analysis()
-        visualizer.create_statistical_summary()
+        visualizer.create_correlation_heatmap()
+        visualizer.create_statistical_results_table()
+        visualizer.create_roc_analysis()
+        visualizer.create_time_analysis()
 
         # 4. Rapor Oluşturma
-        print("\n📋 4. RAPOR OLUŞTURMA AŞAMASI")
-        print("-" * 30)
+        logger.info("\n📋 4. RAPOR OLUŞTURMA AŞAMASI")
+        logger.info("-" * 30)
 
-        report_generator = ReportGenerator(data_processor, analyzer)
-        report_generator.generate_comprehensive_report()
+        report_generator = DermatologyReportGenerator(data_processor, analyzer, visualizer)
 
-        # 5. Özet
-        print("\n🎉 ANALİZ TAMAMLANDI!")
-        print("=" * 30)
-        print(f"📁 Çıktı Klasörü: {CONFIG['paths']['output_dir']}")
-        print("\n📊 Oluşturulan Dosyalar:")
-        print("   📈 genel_karsilastirma.png - Genel performans karşılaştırması")
-        print("   📊 sinif_bazli_analiz.png - Hastalık sınıfı bazlı analiz")
-        print("   🔄 karisikhk_matrisleri.png - Karışıklık matrisleri")
-        print("   👨‍⚕️ deneyim_analizi.png - Deneyim süresi analizi")
-        print("   📋 istatistiksel_ozet.png - İstatistiksel test sonuçları")
-        print("   📄 dermatoloji_tezi_analiz_raporu.txt - Kapsamlı metin raporu")
-        print("   💾 analiz_sonuclari.json - Tüm sonuçların JSON formatı")
+        report_generator.generate_json_report()
+        report_generator.generate_excel_report()
+        report_generator.generate_markdown_report()
+        report_generator.create_thesis_tables()
 
-        print("\n🔍 Anahtar Bulgular:")
+        # 5. Özet Bilgiler
+        logger.info("\n📈 ANALİZ ÖZETİ")
+        logger.info("-" * 20)
 
-        # Kısa özet göster
-        if data_processor.model_data is not None and data_processor.participant_data is not None:
-            model_acc = data_processor.model_data['model_correct'].mean()
-            human_acc = data_processor.participant_data['is_correct'].mean()
-            print(f"   🤖 Model Başarı Oranı: {model_acc:.3f} ({model_acc * 100:.1f}%)")
-            print(f"   👥 İnsan Başarı Oranı: {human_acc:.3f} ({human_acc * 100:.1f}%)")
+        # Ana bulgular
+        if 'group_comparisons' in analyzer.results:
+            if 'uzman_vs_resident' in analyzer.results['group_comparisons']:
+                result = analyzer.results['group_comparisons']['uzman_vs_resident']
+                logger.info(f"👨‍⚕️ Uzman Başarı: {result['uzman_mean']:.3f} ({result['uzman_mean'] * 100:.1f}%)")
+                logger.info(
+                    f"👨‍🎓 Resident Başarı: {result['resident_mean']:.3f} ({result['resident_mean'] * 100:.1f}%)")
+                logger.info(f"📊 p-değeri: {result['p_value']:.4f}")
+                logger.info(f"🎯 Anlamlılık: {'Anlamlı' if result['significant'] else 'Anlamlı Değil'}")
 
-            if model_acc > human_acc:
-                print(f"   ✅ Model insanlardan {((model_acc - human_acc) / human_acc) * 100:.1f}% daha başarılı")
-            else:
-                print(f"   ✅ İnsanlar modelden {((human_acc - model_acc) / model_acc) * 100:.1f}% daha başarılı")
+        if 'model_vs_human' in analyzer.results:
+            if 'overall' in analyzer.results['model_vs_human']:
+                overall = analyzer.results['model_vs_human']['overall']
+                logger.info(f"🤖 Model Başarı: {overall['model_accuracy']:.3f} ({overall['model_accuracy'] * 100:.1f}%)")
+                logger.info(f"👥 İnsan Başarı: {overall['human_accuracy']:.3f} ({overall['human_accuracy'] * 100:.1f}%)")
+                logger.info(f"📈 Fark: {overall['difference']:.3f}")
 
-        if 'group' in data_processor.participant_data.columns:
-            group_stats = data_processor.participant_data.groupby('group')['is_correct'].mean()
-            for group, acc in group_stats.items():
-                print(f"   👨‍⚕️ {group} Başarı Oranı: {acc:.3f} ({acc * 100:.1f}%)")
-
-                print("\n📚 Tez Kullanımı:")
-                print("   • Grafikleri doğrudan tez belgenize ekleyebilirsiniz")
-                print("   • İstatistiksel test sonuçlarını metodoloji bölümünde kullanın")
-                print("   • Kapsamlı raporu bulgular bölümü için referans alın")
-                print("   • JSON dosyasını istatistik programlarında (R, SPSS) açabilirsiniz")
-                print("   • Sınıf bazlı analizleri hastalık spesifik tartışmalarda kullanın")
-
-                print("\n🎯 Sonraki Adımlar:")
-                print("   1. Grafikleri tez formatına uygun şekilde düzenleyin")
-                print("   2. İstatistiksel anlamlılık sonuçlarını yorumlayın")
-                print("   3. Model performansının klinik etkileri üzerine tartışın")
-                print("   4. Deneyim süresi bulgularını eğitim programları için önerilere dönüştürün")
-                print("   5. Sınırlılıklar ve gelecek çalışmalar bölümünü güncelleyin")
-
-                print("\n🔬 İstatistiksel Anlamlılık Rehberi:")
-                print("   • p < 0.05: İstatistiksel olarak anlamlı")
-                print("   • p < 0.01: Yüksek anlamlılık seviyesi")
-                print("   • p < 0.001: Çok yüksek anlamlılık seviyesi")
-                print("   • Cohen's Kappa > 0.6: İyi uyuşma")
-                print("   • AUC > 0.8: Mükemmel sınıflandırma performansı")
-
-                print("\n📖 Tez Bölümleri için Öneriler:")
-                print("   📊 Bulgular:")
-                print("      - Genel karşılaştırma grafiğini ana bulgular olarak sunun")
-                print("      - Sınıf bazlı analizi detaylı bulgular bölümünde kullanın")
-                print("      - İstatistiksel test sonuçlarını tablolar halinde verin")
-                print("   🔍 Tartışma:")
-                print("      - Model vs uzman karşılaştırmasını literatür ile destekleyin")
-                print("      - Deneyim etkisini mevcut eğitim sistemleri ile ilişkilendirin")
-                print("      - Klinik kullanım potansiyelini vurgulayın")
-                print("   📚 Sonuç:")
-                print("      - Ana bulguları özetleyin")
-                print("      - Klinik öneriler getirin")
-                print("      - Gelecek araştırma alanlarını belirtin")
-
-                print(f"\n📞 Destek ve İletişim:")
-                print(f"   GitHub: https://github.com/arcankc")
-                print(f"   Aktif Repolar:")
-                print(f"      • StackedRealTest - Test seti analizleri")
-                print(f"      • Swin_Tiny_85.84f1- - Swin Transformer modeli")
-                print(f"      • StackedQuizTest - Quiz test analizleri")
-                print(f"      • EfficientNet_V2_m - EfficientNet V2 modeli")
-                print(f"      • Deit-iii - DeiT III implementasyonu")
-
-                return True
-
-            except Exception as e:
-                print(f"\n❌ ANALIZ HATASI: {e}")
-                import traceback
-                traceback.print_exc()
-                return False
-
-    # =============================================================================
-    # ADDITIONAL UTILITY FUNCTIONS
-    # =============================================================================
-
-    def validate_data_files():
-        """Veri dosyalarının varlığını kontrol et"""
-        print("\n🔍 Veri dosyaları kontrol ediliyor...")
-
-        model_path = Path(CONFIG['paths']['model_results'])
-        participant_path = Path(CONFIG['paths']['participant_results'])
-
-        issues = []
-
-        if not model_path.exists():
-            issues.append(f"❌ Model sonuçları bulunamadı: {model_path}")
-        else:
-            print(f"✅ Model sonuçları mevcut: {model_path}")
-
-        if not participant_path.exists():
-            issues.append(f"❌ Katılımcı sonuçları bulunamadı: {participant_path}")
-        else:
-            print(f"✅ Katılımcı sonuçları mevcut: {participant_path}")
-
-        # Output directory kontrolü
-        output_dir = Path(CONFIG['paths']['output_dir'])
-        output_dir.mkdir(parents=True, exist_ok=True)
-        print(f"✅ Çıktı klasörü hazır: {output_dir}")
-
-        if issues:
-            print("\n⚠️ UYARI: Bazı dosyalar eksik!")
-            for issue in issues:
-                print(f"   {issue}")
-            print("\n💡 Çözüm önerileri:")
-            print("   • Dosya yollarını CONFIG bölümünden kontrol edin")
-            print("   • Dosya isimlerinin doğru olduğundan emin olun")
-            print("   • Dosya izinlerini kontrol edin")
-            return False
+        logger.info(f"\n📁 Tüm çıktılar hazır: {CONFIG['paths']['output_dir']}")
+        logger.info("🎓 Dermatoloji uzmanlık teziniz için analizler tamamlandı!")
 
         return True
 
-    def create_sample_data():
-        """Örnek veri dosyaları oluştur (test amaçlı)"""
-        print("\n🔧 Örnek veri dosyaları oluşturuluyor...")
-
-        # Örnek model sonuçları
-        model_sample = pd.DataFrame({
-            'question_id': [f'Q{i:03d}' for i in range(1, 81)],
-            'image_id': [f'ISIC_{i:07d}' for i in range(1000000, 1000080)],
-            'true_class': np.random.choice(list(CONFIG['classes'].keys()), 80),
-            'model_correct': np.random.choice([True, False], 80, p=[0.75, 0.25]),
-            'CNN + TTA_correct': np.random.choice([True, False], 80, p=[0.78, 0.22]),
-            'LightGBM_correct': np.random.choice([True, False], 80, p=[0.73, 0.27])
-        })
-
-        # Örnek katılımcı sonuçları
-        participants = []
-        for participant_id in range(1, 21):  # 20 katılımcı
-            experience_level = np.random.choice(['Uzman Dr.', 'Asistan Dr.', 'Prof. Dr.', 'Doç. Dr.'])
-            experience_years = np.random.randint(1, 20)
-
-            for question_id in range(1, 81):  # 80 soru
-                correct_answer = np.random.choice(list(CONFIG['classes'].keys()))
-                # Uzmanlar daha başarılı
-                success_prob = 0.8 if 'Uzman' in experience_level or 'Prof' in experience_level or 'Doç' in experience_level else 0.6
-                is_correct = np.random.choice([True, False], p=[success_prob, 1 - success_prob])
-                participant_answer = correct_answer if is_correct else np.random.choice(list(CONFIG['classes'].keys()))
-
-                participants.append({
-                    'participant_id': f'P{participant_id:03d}',
-                    'question_id': f'Q{question_id:03d}',
-                    'participant_answer': participant_answer,
-                    'correct_answer': correct_answer,
-                    'is_correct': is_correct,
-                    'experience_level': experience_level,
-                    'experience_years': experience_years
-                })
-
-        participant_sample = pd.DataFrame(participants)
-
-        # Dosyaları kaydet
-        sample_dir = Path(CONFIG['paths']['base_dir']) / 'sample_data'
-        sample_dir.mkdir(exist_ok=True)
-
-        model_sample.to_csv(sample_dir / 'sample_detailed_results.csv', index=False)
-        participant_sample.to_excel(sample_dir / 'sample_quiz_results.xlsx', index=False)
-
-        print(f"✅ Örnek veri dosyaları oluşturuldu: {sample_dir}")
-        print("💡 Gerçek verilerinizi kullanmak için CONFIG bölümündeki yolları güncelleyin")
-
-    def print_system_requirements():
-        """Sistem gereksinimlerini yazdır"""
-        print("\n📋 SİSTEM GEREKSİNİMLERİ:")
-        print("-" * 30)
-
-        required_packages = [
-            'pandas', 'numpy', 'matplotlib', 'seaborn', 'scipy',
-            'statsmodels', 'scikit-learn', 'openpyxl'
-        ]
-
-        print("Gerekli Python Paketleri:")
-        for package in required_packages:
-            try:
-                __import__(package)
-                print(f"   ✅ {package}")
-            except ImportError:
-                print(f"   ❌ {package} - Yüklenmemiş!")
-                print(f"      Yüklemek için: pip install {package}")
-
-        print("\nDosya Format Gereksinimleri:")
-        print("   📄 Model Sonuçları: CSV formatında")
-        print("      - Gerekli sütunlar: question_id, model_correct, true_class")
-        print("   📊 Katılımcı Sonuçları: Excel formatında")
-        print("      - Gerekli sütunlar: participant_id, question_id, is_correct")
-        print("      - İsteğe bağlı: experience_level, experience_years")
-
-    def create_readme():
-        """README dosyası oluştur"""
-        readme_path = Path(CONFIG['paths']['output_dir']) / 'README.md'
-
-        readme_content = """# Dermatoloji Uzmanlık Tezi - Veri Analizi Sonuçları
-
-        ## 📊 Analiz Özeti
-        Bu klasör, dermatoloji uzmanlık tezinde kullanılan AI model performansı ile insan uzman performansı karşılaştırma analizinin sonuçlarını içermektedir.
-
-        ## 📁 Dosya Açıklamaları
-
-        ### 📈 Grafikler
-        - `genel_karsilastirma.png` - Model vs İnsan genel performans karşılaştırması
-        - `sinif_bazli_analiz.png` - Hastalık sınıfı bazlı detaylı analiz
-        - `karisikhk_matrisleri.png` - Model, uzman ve asistan karışıklık matrisleri
-        - `deneyim_analizi.png` - Deneyim süresi ile başarı oranı ilişkisi
-        - `istatistiksel_ozet.png` - İstatistiksel test sonuçları tablosu
-
-        ### 📄 Raporlar
-        - `dermatoloji_tezi_analiz_raporu.txt` - Kapsamlı analiz raporu
-        - `analiz_sonuclari.json` - Tüm sonuçların JSON formatı
-        - `README.md` - Bu dosya
-
-        ## 🔍 Ana Bulgular
-
-        ### Model vs İnsan Karşılaştırması
-        - AI modelin genel başarı oranı
-        - İnsan uzmanların ortalama başarı oranı
-        - İstatistiksel anlamlılık testi sonuçları
-
-        ### Uzman vs Asistan Analizi
-        - Deneyim seviyesi ile performans ilişkisi
-        - Hastalık sınıfı bazlı performans farkları
-        - İstatistiksel karşılaştırma sonuçları
-
-        ### Sınıf Bazlı Performans
-        - Her hastalık sınıfı için ayrı analiz
-        - Model, uzman ve asistan performans karşılaştırması
-        - Zorluk seviyesi analizi
-
-        ## 📚 Tez Kullanımı
-        Bu sonuçlar doğrudan tez belgelerinde kullanılabilir:
-        - Grafikler → Bulgular bölümü
-        - İstatistiksel sonuçlar → Metodoloji ve bulgular
-        - Kapsamlı rapor → Tartışma bölümü referansı
-
-        ## 🔗 İletişim
-        - GitHub: https://github.com/arcankc
-        - Tarih: """ + datetime.now().strftime('%d.%m.%Y') + """
-        - Versiyon: 1.0.0
-
-        ## 📖 Kullanım Lisansı
-        Bu analiz sonuçları dermatoloji uzmanlık tezi kapsamında akademik kullanım için hazırlanmıştır.
-        """
-
-        with open(readme_path, 'w', encoding='utf-8') as f:
-            f.write(readme_content)
-
-        print(f"✅ README dosyası oluşturuldu: {readme_path}")
+    except Exception as e:
+        logger.error(f"❌ Analiz sırasında hata oluştu: {e}")
+        logger.error(f"Hata detayı: {traceback.format_exc()}")
+        return False
 
 
 # =============================================================================
-# MAIN EXECUTION
+# ENTRY POINT
 # =============================================================================
+
 if __name__ == "__main__":
     print("🚀 Dermatoloji Uzmanlık Tezi - Kapsamlı Veri Analizi Sistemi")
     print(f"👤 Geliştirici: arcankc (GitHub: https://github.com/arcankc)")
     print(f"📅 Tarih: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
     print(f"🏥 Amaç: AI Model vs İnsan Uzman Performans Karşılaştırması")
-
-    # Sistem gereksinimlerini kontrol et
-    print_system_requirements()
-
-    # Veri dosyalarını kontrol et
-    if not validate_data_files():
-        print("\n❓ Örnek veri dosyaları oluşturulsun mu? (y/n)")
-        choice = input().lower().strip()
-        if choice in ['y', 'yes', 'e', 'evet']:
-            create_sample_data()
-            print("\n💡 Örnek veriler oluşturuldu. Gerçek verilerinizle değiştirmeyi unutmayın!")
-        else:
-            print("\n⚠️ Lütfen veri dosyalarını kontrol edin ve tekrar çalıştırın.")
-            exit(1)
+    print("=" * 70)
 
     # Ana analizi çalıştır
     success = main()
 
     if success:
-        # README dosyası oluştur
-        create_readme()
-
         print("\n🎉 TÜM ANALİZLER BAŞARIYLA TAMAMLANDI!")
         print("=" * 50)
         print("📊 Dermatoloji teziniz için hazır:")
-        print("   • Yüksek kaliteli grafikler")
+        print("   • Yüksek kaliteli grafikler (300 DPI)")
         print("   • İstatistiksel test sonuçları")
         print("   • Kapsamlı analiz raporları")
-        print("   • JSON veri formatları")
-        print("   • Kullanım kılavuzu (README)")
+        print("   • JSON ve Excel veri formatları")
+        print("   • Markdown tez raporu")
+        print("   • LaTeX tabloları")
+        print("   • ROC eğrileri ve confusion matrices")
 
-        print("\n🏆 Tez Başarı İpuçları:")
-        print("   ✨ Grafikleri yüksek çözünürlükle kaydedin (300 DPI)")
-        print("   📝 İstatistiksel sonuçları metodoloji bölümünde açıklayın")
-        print("   🔍 Bulgularınızı literatür ile destekleyin")
-        print("   💡 Klinik önerilerinizi sonuç bölümünde vurgulayın")
-        print("   🎯 Gelecek çalışmalar için yön belirleyin")
+        print("\n🎯 Sonraki Adımlar:")
+        print("   1. Grafikleri tez formatına uygun şekilde düzenleyin")
+        print("   2. İstatistiksel anlamlılık sonuçlarını yorumlayın")
+        print("   3. Model performansının klinik etkileri üzerine tartışın")
+        print("   4. Deneyim süresi bulgularını eğitim önerileriyle ilişkilendirin")
+        print("   5. Sınırlılıklar ve gelecek çalışmalar bölümünü yazın")
 
-        print(f"\n📁 Tüm dosyalar hazır: {CONFIG['paths']['output_dir']}")
-        print("🎓 Tez yazımında başarılar dileriz!")
+        print("\n📞 Destek:")
+        print("   GitHub: https://github.com/arcankc/Statistics")
+        print("   🔬 Dermatoloji AI araştırmaları için optimize edilmiştir")
 
     else:
         print("\n💥 Analiz başarısız oldu!")
-        print("🔧 Hata mesajlarını kontrol edin ve gerekli düzeltmeleri yapın.")
-        print("💬 GitHub üzerinden destek alabilirsiniz: https://github.com/arcankc")
+        print("🔧 Log dosyasını kontrol edin ve gerekli düzeltmeleri yapın.")
+        print(f"📁 Log konumu: {CONFIG['paths']['output_dir']}")
+
+    print(f"\n🏆 Tez yazımında başarılar dileriz!")
